@@ -584,7 +584,7 @@ Header: Clinical path
 Options: R5a "Classify after prefilter" · R5b "Release on DONE" · R5c "Outage = clinical" · R5d "Opt-out: CHW calls" (all recommended)
 State: approved (R5c); R5a/R5b/R5d declined
 Actual answer: selected only "Outage = clinical" (D6, 2026-10-03)
-Accepted scope: R5c: LLM API error or timeout → clinical baton timing (5 min/CHW) + safety template; test: mocked timeout routes to clinical baton. R5a declined: pre-filter hit skips classify (admin barrier on mixed messages not logged). R5b declined: deferred-action trigger stays ambiguous → listed under unresolved decisions. R5d declined: opted-out clinical behavior stays undefined → listed under unresolved decisions.
+Accepted scope: R5c: LLM API error or timeout → clinical baton timing (5 min/CHW) + safety template; test: mocked timeout routes to clinical baton. R5a declined: pre-filter hit skips classify (admin barrier on mixed messages not logged). R5b declined: deferred-action trigger stays ambiguous → listed under unresolved decisions. R5d resolved by user direction (2026-10-03, "if they text stop, you stop"): after STOP the system sends nothing to the patient, including safety templates, until START; no CHW auto-notification. Test: opted-out + "chest pain" → no outbound SMS, event logged.
 History: none
 
 ### R6: State-machine exits (multi-select; each item independent)
@@ -602,9 +602,9 @@ Question D7:
 D7 — Which state-machine exits should the plan adopt? (multi-select)
 Header: State exits
 Options: R6a "None + clinic N row" · R6b "Apply replies in order" · R6c "Baton/claim timeouts" · R6d "DONE restores state" (all recommended)
-State: pending
-Actual answer: "[No preference]" (D7, 2026-10-03), no option approved; left unresolved
-Accepted scope: none
+State: approved (user direction)
+Actual answer: user, 2026-10-03: "when case stuck, it is stuck, and gives a default message saying loading times are slow now" (R6a–R6d not adopted)
+Accepted scope: no automatic exits for stuck cases (no claimed-case timeout, no supervisor repaging, no reply reordering, DONE target unchanged). Any non-clinical patient inbound on a case that is escalated/paused or has no open prompt gets one fixed holding template: "Sorry, replies are slow right now. A health worker will get back to you." No state change; logs a `holding_reply` event. Clinical keywords still run first and take the clinical path. Test: stuck case + "hello?" → holding template, state unchanged; stuck case + "chest pain" → clinical path.
 History: none
 
 ### R7: Inbound routing and outbound delivery (multi-select; each item independent)
@@ -624,7 +624,7 @@ Header: Routing
 Options: R7a "Handle send failures" · R7b "One case per phone" · R7c "HELP + reply-2" · R7d "Length test" (all recommended)
 State: approved (R7a, R7d); R7b/R7c declined
 Actual answer: selected "Handle send failures" and "Length test" (D8 re-asked, 2026-10-03)
-Accepted scope: R7a: on Twilio send error log `send_failed` + error code, do not advance state, dashboard "unreachable" list; test: mocked 21608 leaves case at prior state with a send_failed event. R7d: unit test asserts every rendered patient template ≤ 120 chars GSM-7; CHW/supervisor SMS may be 2 segments; patient quote truncated to 60 chars. R7b declined: multiple open cases per phone stay undefined → unresolved. R7c declined: HELP reply and the reply-2 route stay undefined → unresolved (note: judges doc describes the reply-2 offer).
+Accepted scope: R7a: on Twilio send error log `send_failed` + error code, do not advance state, dashboard "unreachable" list; test: mocked 21608 leaves case at prior state with a send_failed event. R7d: unit test asserts every rendered patient template ≤ 120 chars GSM-7; CHW/supervisor SMS may be 2 segments; patient quote truncated to 60 chars. R7b deferred by user direction (2026-10-03, "dont need to think about two cases on one phone for now"): out of scope for v0; seed data uses one case per phone. R7c declined: HELP reply and the reply-2 route stay undefined → unresolved (note: judges doc describes the reply-2 offer).
 History: first ask dismissed by user (D8, 2026-10-03), re-asked unchanged on resume
 Accepted scope: none
 History: none
@@ -689,7 +689,7 @@ Actual answer: B "Skip" (D12, 2026-10-03)
 Accepted scope: none; shortcuts tracked only in the decision log (dec-6e0a360e, dec-b15e8613).
 History: none
 
-Approval readiness: PASS — checked R1 (D2), R2 (D3), R3 (D4), R4 (D5), R5c (D6), R7a/R7d (D8), R8a (D9), R9 (D10), R10 (D11), R11 (D12); unresolved: R5b, R5d, R6 (D7), R7b, R7c, R8b.
+Approval readiness: PASS (re-checked after user direction on R5d, R6, R7b) — checked R6 (user), R5d (user), R7b (deferred, user), R1 (D2), R2 (D3), R3 (D4), R4 (D5), R5c (D6), R7a/R7d (D8), R8a (D9), R9 (D10), R10 (D11), R11 (D12); unresolved: R5b, R7c, R8b.
 
 ## Eng review body
 
@@ -699,6 +699,7 @@ Approval readiness: PASS — checked R1 (D2), R2 (D3), R3 (D4), R4 (D5), R5c (D6
 - Real voice/IVR: stretch goal only, as in the approved design.
 - DB indexes: unnecessary at demo scale (≤ 100 cases).
 - TODOS.md hardening item: declined by D12.
+- Two open cases on one phone: deferred by user (R7b).
 
 ### What already exists
 - Twilio Python SDK `RequestValidator` covers webhook auth (D2); no custom crypto.
@@ -713,8 +714,9 @@ Approval readiness: PASS — checked R1 (D2), R2 (D3), R3 (D4), R4 (D5), R5c (D6
 | Twilio send | 21608 unverified handset | send_failed, state unchanged (D8), tested | dashboard "unreachable" |
 | LLM call | timeout / outage | clinical timing + safety template (D6), tested | patient gets safety SMS; CHW paged |
 | Scheduler + webhook | claim and timeout collide | single thread only (D3 shortcut) | double owner if run multi-worker |
-| CHW claim | claimed, never DONE | **none (R6 unresolved)** | **silent: case sits paused forever — critical gap** |
-| Patient phone | two open cases on one phone | **none (R7b declined)** | **silent: reply applied to an arbitrary case — critical gap** |
+| CHW claim | claimed, never DONE | holding template on patient inbound (R6, user direction) | patient: "replies are slow right now"; case stays stuck by design |
+| Patient phone | two open cases on one phone | none (R7b deferred, out of scope v0) | **silent: reply applied to an arbitrary case — critical gap, accepted** |
+| Opt-out | STOP then a symptom | none by design (R5d, user direction) | nothing sent; patient must restart with START |
 | HELP / reply 2 | patient texts HELP or 2 | none (R7c declined) | likely routed to classifier → unknown → CHW |
 | Radar | "6 of N" asked by judge | none (R8b declined) | number not explainable |
 
@@ -760,16 +762,17 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: Test review — D11
   - Files: eval.py, eval/heldout.jsonl
   - Verify: python eval.py --heldout
+- [ ] **T9 (P2, human: ~1h / CC: ~10min)** — core.py — Holding reply for stuck cases; STOP silences all patient SMS
+  - Surfaced by: user direction on R6 and R5d
+  - Files: core.py, templates.py, tests/test_core.py
+  - Verify: stuck + "hello?" → holding template; opted-out + "chest pain" → no outbound
 - [ ] **T8 (P3, human: ~10min / CC: ~2min)** — app.py — Mark single-thread scheduler and global clock_offset with gstack-shortcut comments; pin workers=1
   - Surfaced by: Architecture — A2 (D3), A3 (D5)
   - Files: app.py
   - Verify: grep gstack-shortcut
 
 ### Unresolved decisions that may bite you later
-- R6 (D7, no preference): state-machine exits — none + clinic N row, reply ordering, baton/claim timeouts, DONE target state.
 - R5b: deferred admin action trigger (claim vs DONE) still ambiguous.
-- R5d: opted-out patient with clinical message — behavior undefined.
-- R7b: multiple open cases on one phone — undefined.
 - R7c: HELP reply and the "reply 2" route — undefined (judges doc describes reply 2).
 - R8b: radar denominator and time window — undefined.
 
@@ -782,8 +785,8 @@ Synthesized from this review's findings. Each task derives from a specific findi
 - NOT in scope: written
 - What already exists: written
 - TODOS.md updates: 1 item proposed to user (skipped)
-- Failure modes: 2 critical gaps flagged
-- Unresolved decisions: 6 in this review
+- Failure modes: 1 critical gap flagged (R7b, accepted deferral)
+- Unresolved decisions: 3 in this review
 - Outside voice: codex, unavailable (not authenticated; native fallback lacks TaskOutput)
 - Parallelization: 3 lanes, 2 parallel / 1 sequential
 - Lake Score: 1/6
@@ -794,17 +797,14 @@ Synthesized from this review's findings. Each task derives from a specific findi
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
 | Outside Review | codex via `/plan-eng-review` | Independent 2nd opinion | 1 | unavailable | not authenticated; native fallback lacked TaskOutput |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES OPEN | 28 issues, 2 critical gaps |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES OPEN | 28 issues, 1 critical gap |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
 - **OUTSIDE COVERAGE:** codex, plan-review phase, unavailable (not authenticated); no native fallback ran. Missing coverage, not a clean pass.
-- **VERDICT:** no reviews CLEAR — eng review required (ISSUES OPEN: 6 unresolved decisions, 2 critical gaps).
+- **VERDICT:** no reviews CLEAR — eng review required (ISSUES OPEN: 3 unresolved decisions, 1 critical gap (accepted deferral)).
 
 **UNRESOLVED DECISIONS:**
-- R6 (D7): state-machine exits (none + clinic N, reply ordering, baton/claim timeouts, DONE target state)
 - R5b: deferred admin action trigger (claim vs DONE)
-- R5d: opted-out patient with a clinical message
-- R7b: multiple open cases on one phone
 - R7c: HELP reply and reply-2 route
 - R8b: radar denominator and time window
