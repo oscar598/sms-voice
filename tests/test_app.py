@@ -15,7 +15,7 @@ def sign(url, form):
 
 @pytest.fixture
 def client():
-    return create_app(auth_token=TOKEN, conn=db.connect()).test_client()
+    return create_app(auth_token=TOKEN, conn=db.connect(), sender=lambda to, body: "SM-test").test_client()
 
 
 # (case, headers, signed_url, signed_form, expected_status)

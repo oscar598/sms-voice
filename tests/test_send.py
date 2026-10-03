@@ -89,7 +89,7 @@ def test_twilio_adapter_maps_errors(exc, code):
 
 def test_api_state_lists_unreachable(conn):
     send_sms(conn, failing_sender(21608), "R-0142", PHONE, "hello", NOW)
-    client = create_app(auth_token="t", conn=conn).test_client()
+    client = create_app(auth_token="t", conn=conn, sender=ok_sender).test_client()
     body = client.get("/api/state").get_json()
     assert body["unreachable"] == [{
         "case_id": "R-0142", "phone": PHONE, "status": "referred",

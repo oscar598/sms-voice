@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sim",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": ["SIM_MODE=1", "TWILIO_AUTH_TOKEN=sim-only", "DB_PATH=sim.db", "PORT=5055", ".venv/bin/python", "app.py"],
+      "port": 5055
+    }
+  ]
+}

@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS cases (
     latest_barrier TEXT,
     claimed_by_chw TEXT,
     opted_out INTEGER NOT NULL DEFAULT 0,
-    completed_by TEXT
+    completed_by TEXT,
+    awaiting TEXT            -- open prompt: 'free_text' | 'yes_no' | NULL
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +55,41 @@ def get_case(conn, case_id):
 
 def set_status(conn, case_id, status):
     conn.execute("UPDATE cases SET status = ? WHERE id = ?", (status, case_id))
+
+
+UPDATABLE = {
+    "status", "visit_date", "escalation", "latest_barrier", "claimed_by_chw",
+    "opted_out", "completed_by", "awaiting", "facility_id",
+}
+
+
+def update_case(conn, case_id, **fields):
+    bad = set(fields) - UPDATABLE
+    if bad:
+        raise ValueError(f"not updatable: {sorted(bad)}")
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    conn.execute(f"UPDATE cases SET {sets} WHERE id = ?", (*fields.values(), case_id))
+
+
+def open_case_for_phone(conn, phone):
+    """Most recent case for this patient phone that is not finished.
+
+    Two open cases on one phone is out of scope for v0 (R7b, user direction).
+    """
+    row = conn.execute(
+        "SELECT * FROM cases WHERE patient_phone = ? AND status NOT IN ('completed', 'lost')"
+        " ORDER BY referred_at DESC LIMIT 1",
+        (phone,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def events(conn, case_id=None):
+    q = "SELECT case_id, ts, actor, kind, barrier, facility_id, payload_json FROM events"
+    args = ()
+    if case_id:
+        q, args = q + " WHERE case_id = ?", (case_id,)
+    return [dict(r) for r in conn.execute(q + " ORDER BY id", args)]
 
 
 def log_event(conn, case_id, ts, actor, kind, barrier=None, facility_id=None, **payload):

@@ -24,9 +24,21 @@ PATIENT = {
     "holding": "Sorry, replies are slow right now. A health worker will get back to you.",
 }
 
+PATIENT["intro"] = "Hi! You were referred to {name} for {service}. Is anything stopping you from going? Reply here."
+
 CLINIC = {
     "arriving": "{case_id} arriving {date}. Reply Y {case_id} when seen.",
 }
+
+CHW = {
+    # CHW/supervisor SMS may run to 2 segments (D8); the patient quote is cut to 60.
+    "baton": "{kind} {case_id} ({phone}): \"{quote}\". Reply 1 {case_id} to take it.",
+    "claimed": "{case_id} is yours. Reply DONE {case_id} or LOST {case_id} when finished.",
+    "which": "Which case? Reply with the case id, e.g. 1 R-0142.",
+    "not_open": "{case_id} has nothing waiting for a health worker.",
+}
+
+STAFF_WHICH = "Which case? Reply with the case id, e.g. Y R-0142."
 
 
 def render(table, key, **slots):
