@@ -70,3 +70,34 @@ def test_endpoint_and_cors(conn):
                                                    "Access-Control-Request-Method": "GET"})
     assert "ngrok-skip-browser-warning" in pre.headers["Access-Control-Allow-Headers"]
     assert "Access-Control-Allow-Origin" not in client.post("/sms").headers  # not /api: no CORS
+
+
+ALLOWED = "https://my-dash.lovable.app, https://id-preview--abc.lovable.app/"
+PREVIEW = "https://id-preview*--p1.lovable.app"
+ORIGIN_CASES = [
+    # (id, DASHBOARD_ORIGIN, request Origin, expected Allow-Origin header or None)
+    ("default allows any site", None, "https://anything.example", "*"),
+    ("published URL allowed", ALLOWED, "https://my-dash.lovable.app", "https://my-dash.lovable.app"),
+    ("preview allowed, trailing slash in config", ALLOWED, "https://id-preview--abc.lovable.app",
+     "https://id-preview--abc.lovable.app"),
+    ("other site gets no CORS header", ALLOWED, "https://evil.example", None),
+    ("preview wildcard, stable form", PREVIEW, "https://id-preview--p1.lovable.app", "https://id-preview--p1.lovable.app"),
+    ("preview wildcard, versioned form", PREVIEW, "https://id-preview-c899f63d--p1.lovable.app",
+     "https://id-preview-c899f63d--p1.lovable.app"),
+    ("wildcard is pinned to the project id", PREVIEW, "https://id-preview--p2.lovable.app", None),
+    ("wildcard cannot span a dot", PREVIEW, "https://id-preview.evil.com--p1.lovable.app", None),
+]
+
+
+@pytest.mark.parametrize("cid,setting,origin,expected", ORIGIN_CASES, ids=[c[0] for c in ORIGIN_CASES])
+def test_dashboard_origin_allowlist(conn, monkeypatch, cid, setting, origin, expected):
+    if setting is None:
+        monkeypatch.delenv("DASHBOARD_ORIGIN", raising=False)
+    else:
+        monkeypatch.setenv("DASHBOARD_ORIGIN", setting)
+    client = create_app(auth_token="t", conn=conn, sender=lambda to, body: "x", now_fn=lambda: NOW).test_client()
+    for method in ("get", "options"):
+        r = getattr(client, method)("/api/dashboard", headers={"Origin": origin, "Access-Control-Request-Method": "GET"})
+        assert r.headers.get("Access-Control-Allow-Origin") == expected
+        if setting:
+            assert r.headers.get("Vary") == "Origin"

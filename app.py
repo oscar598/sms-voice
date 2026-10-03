@@ -364,7 +364,14 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
     def dashboard():
         return jsonify(metrics.dashboard(conn, now_fn(), seed.FACILITIES))
 
-    dashboard_origin = os.environ.get("DASHBOARD_ORIGIN", "*")
+    # Comma-separated list of sites allowed to call /api/* from a browser (the Lovable
+    # preview and published URLs). "*" or unset = any site. This is browser-side only:
+    # it does not stop a direct curl, so it is not authentication.
+    # An entry may contain "*", matching letters, digits and dashes only (Lovable preview
+    # URLs change per version: https://id-preview*--<project-id>.lovable.app).
+    allowed_origins = {o.strip().rstrip("/") for o in os.environ.get("DASHBOARD_ORIGIN", "*").split(",") if o.strip()}
+    origin_patterns = [re.compile("^" + re.escape(o).replace(r"\*", "[a-z0-9-]*") + "$")
+                       for o in allowed_origins if o != "*"]
 
     referral_token = os.environ.get("REFERRAL_TOKEN", "")
 
@@ -398,10 +405,18 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
     def cors_for_api(resp):
         # The hosted dashboard (Lovable) calls /api/* from another origin. Reads are
         # open; /api/referrals also accepts POST and needs the Authorization header.
-        # Set DASHBOARD_ORIGIN to the Lovable URL to lock it down.
+        # Set DASHBOARD_ORIGIN to the Lovable URL(s) to lock it down.
         if request.path.startswith("/api/"):
             writes = request.path == "/api/referrals"
-            resp.headers["Access-Control-Allow-Origin"] = dashboard_origin
+            origin = request.headers.get("Origin", "")
+            if "*" in allowed_origins:
+                resp.headers["Access-Control-Allow-Origin"] = "*"
+            elif any(p.match(origin) for p in origin_patterns):
+                resp.headers["Access-Control-Allow-Origin"] = origin
+                resp.headers["Vary"] = "Origin"
+            else:
+                resp.headers["Vary"] = "Origin"
+                return resp  # no CORS headers: the browser blocks the other site
             resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS" if writes else "GET, OPTIONS"
             resp.headers["Access-Control-Allow-Headers"] = (
                 "Content-Type, ngrok-skip-browser-warning" + (", Authorization" if writes else ""))
