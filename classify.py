@@ -105,8 +105,11 @@ def build_request(text, today):
     )
 
 
-def classify(text, today=None, client=None):
-    """Return the model's label dict, or raise ClassifierUnavailable."""
+def classify(text, today=None, client=None, meta=None):
+    """Return the model's label dict, or raise ClassifierUnavailable.
+
+    If `meta` is a dict, token usage is recorded in it (used by eval.py).
+    """
     today = today or date.today()
     try:
         client = client or _default_client()
@@ -119,6 +122,9 @@ def classify(text, today=None, client=None):
             raise
         raise ClassifierUnavailable("no credentials") from e
 
+    usage = getattr(response, "usage", None)
+    if meta is not None and usage is not None:
+        meta["usage"] = {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
     if response.stop_reason != "end_turn":  # refusal (whole chain declined) or max_tokens
         raise ClassifierUnavailable(f"stop_reason={response.stop_reason}")
     text_block = next((b for b in response.content if b.type == "text"), None)

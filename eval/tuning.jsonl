@@ -1,0 +1,100 @@
+{"text": "I have no fare to get to the clinic", "label": "transport", "fields": {}}
+{"text": "sina pesa ya nauli kufika hospitali", "label": "transport", "fields": {}}
+{"text": "sina doh ya mat bana", "label": "transport", "fields": {}}
+{"text": "its too far from where i stay, no matatu goes there", "label": "transport", "fields": {}}
+{"text": "hakuna mtu wa kunipeleka", "label": "transport", "fields": {}}
+{"text": "the boda guy wants 300 i dont have", "label": "transport", "fields": {}}
+{"text": "how do i get there from kayole stage", "label": "transport", "fields": {}}
+{"text": "how much will they charge me there?", "label": "cost", "fields": {}}
+{"text": "nitalipa pesa ngapi huko?", "label": "cost", "fields": {}}
+{"text": "ati scan ni 2k sina hiyo doh", "label": "cost", "fields": {}}
+{"text": "do they accept SHA or I have to pay cash", "label": "cost", "fields": {}}
+{"text": "sina NHIF, itakuwa bei gani", "label": "cost", "fields": {}}
+{"text": "I cant afford the lab test they want", "label": "cost", "fields": {}}
+{"text": "is the consultation free?", "label": "cost", "fields": {}}
+{"text": "they said they don't do eye checks there", "label": "wrong_facility", "fields": {}}
+{"text": "wameniambia hawana huduma hiyo hapa", "label": "wrong_facility", "fields": {}}
+{"text": "hiyo hosi haina daktari wa macho bana", "label": "wrong_facility", "fields": {}}
+{"text": "the nurse said I was sent to the wrong place", "label": "wrong_facility", "fields": {}}
+{"text": "they told me to go to a bigger hospital for this", "label": "wrong_facility", "fields": {}}
+{"text": "hapa hawafanyi hiyo test, wameniambia niende kwingine", "label": "wrong_facility", "fields": {}}
+{"text": "that clinic is only for TB, not what i was referred for", "label": "wrong_facility", "fields": {}}
+{"text": "I lost the referral letter", "label": "missing_documents", "fields": {"missing_doc": "referral letter"}}
+{"text": "nimepoteza barua ya rufaa", "label": "missing_documents", "fields": {"missing_doc": "referral letter"}}
+{"text": "sina ID yangu, wanataka ID", "label": "missing_documents", "fields": {"missing_doc": "national id"}}
+{"text": "they want my clinic book and i left it ushago", "label": "missing_documents", "fields": {"missing_doc": "clinic book"}}
+{"text": "wanataka results za lab sina", "label": "missing_documents", "fields": {"missing_doc": "lab results"}}
+{"text": "do i need to bring my insurance card? i dont have it", "label": "missing_documents", "fields": {"missing_doc": "insurance card"}}
+{"text": "my ID card is with my husband who is away", "label": "missing_documents", "fields": {"missing_doc": "national id"}}
+{"text": "when is my appointment?", "label": "scheduling", "fields": {}}
+{"text": "siku gani niende?", "label": "scheduling", "fields": {}}
+{"text": "hawajanipa date bado", "label": "scheduling", "fields": {}}
+{"text": "I work monday to saturday, can I come on sunday?", "label": "scheduling", "fields": {}}
+{"text": "they said book first but the number doesnt go through", "label": "scheduling", "fields": {}}
+{"text": "nikienda weekday nitafutwa kazi", "label": "scheduling", "fields": {}}
+{"text": "what time do they open for appointments", "label": "scheduling", "fields": {}}
+{"text": "went there yesterday the gate was locked, nobody there", "label": "clinic_closed", "fields": {}}
+{"text": "nilienda jana nikapata imefungwa", "label": "clinic_closed", "fields": {}}
+{"text": "hosi ilikuwa closed jana, hakuna mtu", "label": "clinic_closed", "fields": {}}
+{"text": "I went on saturday and it was shut", "label": "clinic_closed", "fields": {}}
+{"text": "clinic was closed when i reached at 4pm", "label": "clinic_closed", "fields": {}}
+{"text": "nimeenda mara mbili na imefungwa", "label": "clinic_closed", "fields": {}}
+{"text": "they were on strike, no one at the clinic", "label": "clinic_closed", "fields": {}}
+{"text": "they said come back monday, queue was full", "label": "turned_away", "fields": {"return_date": "2026-10-12"}}
+{"text": "walisema nirudi jumatatu, foleni ilikuwa ndefu", "label": "turned_away", "fields": {"return_date": "2026-10-12"}}
+{"text": "walinifukuza ati foleni imejaa", "label": "turned_away", "fields": {}}
+{"text": "the receptionist sent me home, said the doctor is not in", "label": "turned_away", "fields": {}}
+{"text": "they told me to come back next week", "label": "turned_away", "fields": {}}
+{"text": "nilifika lakini wakaniambia nirudi kesho", "label": "turned_away", "fields": {"return_date": "2026-10-06"}}
+{"text": "they only see 20 people a day and i was late", "label": "turned_away", "fields": {}}
+{"text": "please send messages in swahili", "label": "language", "fields": {"language": "sw"}}
+{"text": "naomba ujumbe kwa kiswahili", "label": "language", "fields": {"language": "sw"}}
+{"text": "sielewi hii msg, tuma kwa kiswa", "label": "language", "fields": {"language": "sw"}}
+{"text": "i dont read english well", "label": "language", "fields": {}}
+{"text": "the doctor only spoke english and i didnt understand", "label": "language", "fields": {}}
+{"text": "tafadhali andika kwa kiswahili", "label": "language", "fields": {"language": "sw"}}
+{"text": "my mother cannot read these messages, she speaks kikuyu", "label": "language", "fields": {}}
+{"text": "why do I need to go there? is it serious?", "label": "fear_confusion", "fields": {}}
+{"text": "naogopa kwenda", "label": "fear_confusion", "fields": {}}
+{"text": "niko na wasiwasi, mbona wananituma huko", "label": "fear_confusion", "fields": {}}
+{"text": "I dont understand why they referred me", "label": "fear_confusion", "fields": {}}
+{"text": "I'm scared they will find something bad", "label": "fear_confusion", "fields": {}}
+{"text": "people will see me at the HIV clinic, I don't want to go", "label": "fear_confusion", "fields": {}}
+{"text": "ni nini hiyo test wananiambia nifanye?", "label": "fear_confusion", "fields": {}}
+{"text": "ok i can go monday", "label": "plan_ack", "fields": {"return_date": "2026-10-12"}}
+{"text": "sawa, nitaenda kesho", "label": "plan_ack", "fields": {"return_date": "2026-10-06"}}
+{"text": "poa, asante", "label": "plan_ack", "fields": {}}
+{"text": "ok thanks", "label": "plan_ack", "fields": {}}
+{"text": "I'll go on Wednesday", "label": "plan_ack", "fields": {"return_date": "2026-10-07"}}
+{"text": "nitaenda ijumaa", "label": "plan_ack", "fields": {"return_date": "2026-10-09"}}
+{"text": "thank you, I understand now", "label": "plan_ack", "fields": {}}
+{"text": "my stomach is still really hurting", "label": "clinical_symptom", "fields": {}}
+{"text": "bado nina maumivu ya tumbo", "label": "clinical_symptom", "fields": {}}
+{"text": "naskia kizunguzungu na damu inatoka", "label": "clinical_symptom", "fields": {}}
+{"text": "NO, my chest hurts", "label": "clinical_symptom", "fields": {}}
+{"text": "the baby has a high fever since last night", "label": "clinical_symptom", "fields": {}}
+{"text": "nina homa kali", "label": "clinical_symptom", "fields": {}}
+{"text": "I feel weak and cant stand up", "label": "clinical_symptom", "fields": {}}
+{"text": "my leg is very swollen now", "label": "clinical_symptom", "fields": {}}
+{"text": "I fainted at the bus stop", "label": "clinical_symptom", "fields": {}}
+{"text": "my baby is not feeding and is very sleepy", "label": "clinical_symptom", "fields": {}}
+{"text": "I can't see properly since yesterday", "label": "clinical_symptom", "fields": {}}
+{"text": "sina nguvu kabisa, siwezi kutembea", "label": "clinical_symptom", "fields": {}}
+{"text": "no fare and also the pain is getting worse", "label": "clinical_symptom", "fields": {}}
+{"text": "I'm pregnant and the baby has stopped moving", "label": "clinical_symptom", "fields": {}}
+{"text": "nimetapika mara tatu leo", "label": "clinical_symptom", "fields": {}}
+{"text": "who is this?", "label": "unknown", "fields": {}}
+{"text": "wewe ni nani?", "label": "unknown", "fields": {}}
+{"text": "?", "label": "unknown", "fields": {}}
+{"text": "no fare and the clinic was also closed", "label": "unknown", "fields": {}}
+{"text": "sina ID na pia sina pesa ya nauli", "label": "unknown", "fields": {}}
+{"text": "hello", "label": "unknown", "fields": {}}
+{"text": "wrong number", "label": "unknown", "fields": {}}
+{"text": "call me", "label": "unknown", "fields": {}}
+{"text": "nipigie", "label": "unknown", "fields": {}}
+{"text": "I am in church now", "label": "unknown", "fields": {}}
+{"text": "can you send airtime", "label": "unknown", "fields": {}}
+{"text": "they closed and also I lost my letter", "label": "unknown", "fields": {}}
+{"text": "ok but the thing", "label": "unknown", "fields": {}}
+{"text": "my sister will go instead of me", "label": "unknown", "fields": {}}
+{"text": "stop sending me ads", "label": "unknown", "fields": {}}
