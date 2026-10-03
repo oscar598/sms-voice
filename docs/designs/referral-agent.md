@@ -7,7 +7,7 @@ Status: APPROVED
 Mode: Builder (24–48h hackathon)
 
 ## Problem Statement
-A referral is written, and then nothing happens. An estimated 30–50% of outpatient specialty referrals are not completed (Int J Med Inform 2023, S1386505623002836). In a study of 103,737 referral scheduling attempts, only 34.8% ended in a documented visit (PMC5910374). The gap between "referred" and "seen" has no owner. The patient hits a barrier, nobody learns which one, and the CHW never finds out whether the patient arrived (PMC6489304).
+A referral is written, and then nothing happens. An estimated 30–50% of outpatient specialty referrals are not completed (Int J Med Inform 2023, S1386505623002836). These figures come from US specialty-care settings and are illustrative for a CHW setting until a locale-specific source is added. In a study of 103,737 referral scheduling attempts, only 34.8% ended in a documented visit (PMC5910374). The gap between "referred" and "seen" has no owner. The patient hits a barrier, nobody learns which one, and the CHW never finds out whether the patient arrived (PMC6489304).
 
 The product is a low-bandwidth SMS (and optionally voice) agent. It contacts each referred patient, works out **why** the referral is stuck, takes the **smallest permitted administrative action**, escalates to a human when needed, and **confirms the visit happened**. It never diagnoses or gives clinical advice.
 
@@ -31,7 +31,7 @@ The product is a low-bandwidth SMS (and optionally voice) agent. It contacts eac
 
 ## Cross-Model Perspective
 Claude subagent cold read (the Codex run failed on a gstack model-resolution error):
-- **Coolest version:** patients as sensors for clinic reliability. Aggregate barriers per clinic, push a reliability score upstream. Adopted as the punchline.
+- **Coolest version:** patients as sensors for clinic reliability. Aggregate barriers per clinic, push a reliability signal upstream (downgraded from "score"; it rests on patient self-report). Adopted as the punchline.
 - **What excites the builder:** coordinating between people ("reply 1 to take it", the agent texting the clinic) more than the patient chat itself.
 - **50% off the shelf:** RapidPro/TextIt (channels, IVR, scheduling, templates). Judged too heavy for 48h; plain Twilio + SQLite instead.
 - **Build order:** stub end to end on a real phone first, then classifier + eval, then the clinic/CHW loops, then seeded cases + dashboard. Cut voice. (I keep one scripted voice call as a stretch goal for the low-literacy story.)
@@ -186,7 +186,7 @@ Tell the judges up front that the 40 background cases are **synthetic seed data*
 
 ## Success Criteria
 - Live SMS round trip on the demo handset in under 5s, three times in a row before the demo. The classifier timeout is 3s.
-- Held-out eval: **100% clinical recall** (30/30, pre-filter + classifier); **wrong-action rate ≤ 3%**; barrier accuracy ≥ 80%, with safe-`unknown` reported separately.
+- Held-out eval (50 messages, ≥ 15 clinical): **100% recall on the held-out clinical subset** (pre-filter + classifier); **wrong actions ≤ 1, reported as k/50**; barrier accuracy ≥ 80%, with safe-`unknown` reported separately. (Amended per D11.)
 - The demo patient goes referred → obstacle → intervention → clinic-confirmed completion with no manual DB edits, and the run can be repeated with a reset script.
 - Every action shown is traceable to one `events` row.
 
@@ -454,3 +454,357 @@ Stop: CONVERGENCE
 
 > The document defines cases.latest_barrier as display-only, takes analytics from events, and counts distinct cases in the numerator. The obligation that '6 of 11 patients' be computable without ambiguity is still unmet, because the denominator population and the time window are undefined.
 <!-- gstack:office-hours:concerns:end -->
+
+---
+
+# Eng Review (plan-eng-review, 2026-10-03)
+
+Target: docs/designs/referral-agent.md (plan). Report file: this document.
+
+## Scope record
+feature answers: none proposed (no cuts); structure: A "Smaller arrangement" (D1, user answer 2026-10-03); accepted scope: all features in the approved design, arranged as Python modules `app.py` (webhook, /api/state, scheduler tick, Twilio send) · `core.py` (pure: router, clinical pre-filter, field validation, rules table, baton + follow-up transitions; takes `now` as a parameter) · `classify.py` (LLM call + JSON/enum validation) · `db.py` (schema + queries) · `templates.py` · `dashboard.html` · `eval.py` + `seed.py`; pending remedies: none at scope time.
+Scope Challenge result: scope accepted as-is (smaller arrangement preserves scope).
+
+## Decision ledger
+
+### R1: Twilio webhook signature validation
+Finding: A1, P1, confidence 9/10, referral-agent.md "Twilio SMS ──► /sms webhook ─► ROUTER" / "The role comes from the sender's phone number", reviewer: Claude (plan-eng-review)
+Plan baseline: no webhook authentication specified (original proposal)
+Runtime evidence: unknown (no code yet). Twilio docs: RequestValidator(auth_token).validate(url, form, X-Twilio-Signature); tunnels terminate TLS so the URL must be rebuilt from X-Forwarded-Proto/Host.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R1 webhook auth | none | validate X-Twilio-Signature, 403 on fail, rebuild URL from X-Forwarded-Proto/Host, `SKIP_TWILIO_SIG=1` only for the local simulator route | none (rely on obscure tunnel URL) |
+| R2 transition atomicity | pending | pending | pending |
+| R3 simulator / fast-forward | pending | pending | pending |
+Question D2:
+D2 — Validate that inbound SMS really came from Twilio?
+ELI10: The webhook URL is public. Without a check, anyone who finds it can pretend to be the clinic and mark a patient "seen", or pretend to be a CHW. Twilio signs every request, and checking that signature is about 6 lines.
+Recommendation: A because a forged completion corrupts the one metric the product exists for.
+Header: Webhook auth
+Options:
+A) Validate signature (recommended)
+Use twilio RequestValidator on /sms; 403 on mismatch; rebuild the public URL from X-Forwarded-Proto/Host so it works behind the tunnel; the local simulator route bypasses it only when SKIP_TWILIO_SIG=1. (human ~1h / CC ~5min)
+B) No validation
+Rely on the tunnel URL being hard to guess; zero code.
+State: approved
+Actual answer: A "Validate signature" (D2, 2026-10-03)
+Accepted scope: /sms validates X-Twilio-Signature with twilio RequestValidator; 403 on mismatch; public URL rebuilt from X-Forwarded-Proto/Host; simulator route may bypass only when SKIP_TWILIO_SIG=1; test: forged request → 403, valid signature → 200.
+History: none
+
+### R2: Atomic case transitions (scheduler vs webhook race)
+Finding: A2, P2, confidence 8/10, referral-agent.md "a scheduler tick every 15s" / "A claim sets cases.claimed_by_chw", reviewer: Claude (plan-eng-review)
+Plan baseline: no concurrency rule specified (original proposal)
+Runtime evidence: unknown (no code yet)
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R1 webhook auth | approved (D2): validate signature | unchanged | unchanged |
+| R2 transition atomicity | unspecified | every transition is one SQLite `BEGIN IMMEDIATE` txn with a guarded UPDATE (`WHERE status=? AND prompts.resolved_at IS NULL`); 0 rows updated = lost race, logged, no SMS sent | single-threaded server + scheduler in same thread, no guards |
+| R3 simulator / fast-forward | pending | pending | pending |
+Question D3:
+D3 — Make each case state change atomic?
+ELI10: Two things can change the same case at once: the timer (e.g. "nobody claimed it, offer to the next CHW") and an incoming SMS ("1 R-0142"). Without a guard, both win and two CHWs think they own a clinical case.
+Recommendation: A because double-ownership of a clinical case is a safety bug, and guarded UPDATEs are cheap.
+Header: Atomicity
+Options:
+A) Guarded transitions (recommended)
+Each transition = BEGIN IMMEDIATE + UPDATE ... WHERE <expected state>; if 0 rows, log `lost_race` event and send nothing. Unit test: claim and timeout applied in both orders leave exactly one owner. (human ~2h / CC ~15min)
+B) Single thread, no guards
+Run the scheduler inside the web worker loop and rely on one thread; no guard code.
+State: approved
+Actual answer: B "Single thread, no guards" (D3, 2026-10-03)
+Accepted scope: scheduler tick runs in the same single thread/event loop as the webhook (one uvicorn/Flask worker, no threads); no guarded UPDATEs. Accepted shortcut (Completeness 6/10): mark the scheduler loop with `gstack-shortcut(dec-6e0a360e): correct only with one worker thread, upgrade when running >1 worker, a separate scheduler process, or any background thread`. Start command must pin workers=1.
+History: none
+
+### R3: Simulated-phone input path
+Finding: A3, P2, confidence 8/10, referral-agent.md "Twilio SMS ──► /sms webhook" as the only inbound path + Scope finding S1 (trial cap 50 SMS/day, 5 verified numbers), reviewer: Claude (plan-eng-review)
+Plan baseline: real SMS is the only inbound path (approved design)
+Runtime evidence: unknown (no code yet). Twilio trial: 50 SMS/day, 5 verified numbers, prefix on every SMS.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R1 webhook auth | approved (D2) | unchanged | unchanged |
+| R2 atomicity | approved (D3): single thread | unchanged | unchanged |
+| R3 inbound path | real SMS only | real SMS + `/sim` page (3 fake phones) posting (from, body) into the same router; in SIM_MODE outbound goes to an on-screen log instead of Twilio | real SMS only |
+| R4 fast-forward scope | global clock_offset | pending | pending |
+Question D4:
+D4 — Add a simulated-phone page that feeds the same router?
+ELI10: Right now the only way to talk to the system is real SMS. The trial account allows 50 a day, so one afternoon of testing uses it up. On stage, a dropped tunnel means no demo. A small /sim page with three fake phones uses the exact same router, so you can develop and, if needed, demo without Twilio.
+Recommendation: A because it protects the SMS quota during the build and gives the live demo a fallback.
+Header: Sim phones
+Options:
+A) Add /sim page (recommended)
+`/sim` shows patient, CHW and clinic phones; sending posts into the same router; in SIM_MODE outbound is shown on screen instead of sent. Real SMS path unchanged. (human ~3h / CC ~20min)
+B) Real SMS only
+Develop and demo only through Twilio.
+State: approved
+Actual answer: A "Add /sim page" (D4, 2026-10-03)
+Accepted scope: `/sim` page with patient/CHW/clinic phones posting into the same router (bypasses signature only with SKIP_TWILIO_SIG=1 per D2); SIM_MODE routes outbound to an on-screen log instead of Twilio; real SMS path unchanged; test: same inbound via /sim and /sms produce identical events.
+History: none
+
+### R4: Fast-forward scope
+Finding: A3 (second part), P2, confidence 8/10, referral-agent.md "Press fast-forward (adds `clock_offset` so the follow-up is due)"; same as office-hours concern R2-15, reviewer: Claude (plan-eng-review)
+Plan baseline: global `clock_offset` (approved design)
+Runtime evidence: unknown (no code yet)
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R1–R3 | approved (D2, D3, D4) | unchanged | unchanged |
+| R4 fast-forward | global clock_offset: every due timer on all 40 seeded cases fires | per-case: sets the chosen case's open prompts `due_at=now`; all date logic uses one `now()` in one configured timezone | global clock_offset (unchanged) |
+Question D5:
+D5 — Make fast-forward affect only the demo case?
+ELI10: Fast-forward as designed moves the whole system's clock. Every seeded case's reminders and timeouts fire at once, which can text the demo phones unexpectedly and change the dashboard numbers mid-demo. Per-case fast-forward only advances the patient you're showing.
+Recommendation: A because stray SMS mid-demo and jumping dashboard numbers undercut the story.
+Header: Fast-forward
+Options:
+A) Per-case fast-forward (recommended)
+Button on the case timeline sets that case's open prompts due now; scheduler fires them on the next tick; one clock and one timezone everywhere. (human ~1h / CC ~10min)
+B) Global clock offset
+Keep as designed.
+State: approved
+Actual answer: B "Global clock offset" (D5, 2026-10-03)
+Accepted scope: keep global `clock_offset` as designed. Accepted shortcut (Completeness 5/10): mark the offset with `gstack-shortcut(dec-b15e8613): all timers advance together and may send stray SMS on stage, upgrade when a rehearsal shows stray SMS or dashboard jumps`. Mitigation inside approved scope: rehearse with seeded cases' prompts already resolved.
+History: none
+
+### R5: Clinical path contract (multi-select; each item independent)
+Finding: Section 2, P1, confidence 9/10, office-hours concerns R2-2, R2-3, R2-4, R2-18; reviewer: Claude (plan-eng-review) + office-hours spec reviewer
+Plan baseline: approved design: pre-filter hit skips classify; deferred admin action waits "until the clinical baton is claimed"; classifier failure → non-clinical baton; STOP halts all patient SMS
+Runtime evidence: unknown (no code yet)
+Comparison grid (each row independently selectable; unselected rows keep Current):
+| Choice | Current | If selected |
+|---|---|---|
+| R5a classify after pre-filter hit | skipped | still call classifier to log an admin barrier; result can never downgrade clinical routing |
+| R5b deferred admin action trigger | "on claim" vs DONE ambiguous | released on CHW `DONE` only, consistent with the escalation pause |
+| R5c classifier outage | non-clinical baton (60 min/CHW) | API error/timeout uses clinical baton timing (5 min/CHW) + safety template |
+| R5d opted-out clinical | undefined | no patient SMS of any kind; clinical baton SMS tells CHW "patient opted out: call"; follow-up treats patient column as none |
+Question D6:
+D6 — Which clinical-path fixes should the plan adopt? (multi-select)
+Header: Clinical path
+Options: R5a "Classify after prefilter" · R5b "Release on DONE" · R5c "Outage = clinical" · R5d "Opt-out: CHW calls" (all recommended)
+State: approved (R5c); R5a/R5b/R5d declined
+Actual answer: selected only "Outage = clinical" (D6, 2026-10-03)
+Accepted scope: R5c: LLM API error or timeout → clinical baton timing (5 min/CHW) + safety template; test: mocked timeout routes to clinical baton. R5a declined: pre-filter hit skips classify (admin barrier on mixed messages not logged). R5b declined: deferred-action trigger stays ambiguous → listed under unresolved decisions. R5d declined: opted-out clinical behavior stays undefined → listed under unresolved decisions.
+History: none
+
+### R6: State-machine exits (multi-select; each item independent)
+Finding: Section 2, P1, confidence 8/10, office-hours concerns R2-7, R2-8, R2-9, R2-10, R2-11; reviewer: Claude (plan-eng-review) + office-hours spec reviewer
+Plan baseline: approved follow-up table and baton rules (no row for none/N, simultaneous-answer assumption, no post-fallback end state, no claimed timeout, DONE → action_taken)
+Runtime evidence: unknown (no code yet)
+Comparison grid (each row independent; unselected keep Current):
+| Choice | Current | If selected |
+|---|---|---|
+| R6a patient none + clinic N | no row | ask patient "What got in the way?"; no reply in 48h → non-clinical baton |
+| R6b reply ordering | assumes both answers at once | apply each reply as it arrives; a later clinic Y always overrides to completed (completed_by=clinic) and cancels in-flight prompts |
+| R6c baton end state + claimed timeout | undefined | clinical: page supervisor every 15 min until claimed; non-clinical: after 2nd round mark `unclaimed` (dashboard list); claimed without DONE: remind CHW at 24h, supervisor at 48h, counts toward lost at 7 days |
+| R6d DONE target state | always action_taken | return to pre-escalation state (visit_scheduled if visit_date set) |
+Question D7:
+D7 — Which state-machine exits should the plan adopt? (multi-select)
+Header: State exits
+Options: R6a "None + clinic N row" · R6b "Apply replies in order" · R6c "Baton/claim timeouts" · R6d "DONE restores state" (all recommended)
+State: pending
+Actual answer: "[No preference]" (D7, 2026-10-03), no option approved; left unresolved
+Accepted scope: none
+History: none
+
+### R7: Inbound routing and outbound delivery (multi-select; each item independent)
+Finding: Section 2, P2, confidence 8/10, office-hours concerns R2-6, R2-19, R2-20, R2-16 + NEW send-failure finding (Twilio 21608 unverified / 21610 opted-out not handled; plan marks case `contacted` regardless); reviewer: Claude (plan-eng-review)
+Plan baseline: approved router; no outbound error handling; no length budget
+Runtime evidence: unknown (no code yet)
+Comparison grid (each row independent; unselected keep Current):
+| Choice | Current | If selected |
+|---|---|---|
+| R7a send failures | case advances to `contacted` even if Twilio rejects | on Twilio error log `send_failed` with error code, do not advance state, show on dashboard "unreachable" list |
+| R7b one open case per phone | undefined | referral form/seed rejects a second open case for the same patient_phone |
+| R7c HELP + reply-2 | HELP undefined; `2` has no expects value | HELP → fixed info reply (program, STOP, CHW number), no state change; add expects='talk' for the reply-2 offer, open 48h, `2` → non-clinical baton |
+| R7d SMS length | unchecked | unit test asserts every rendered template ≤ 120 chars GSM-7 (trial prefix headroom); CHW/supervisor SMS may be 2 segments; patient quote truncated to 60 chars |
+Question D8:
+D8 — Which routing/delivery fixes should the plan adopt? (multi-select)
+Header: Routing
+Options: R7a "Handle send failures" · R7b "One case per phone" · R7c "HELP + reply-2" · R7d "Length test" (all recommended)
+State: approved (R7a, R7d); R7b/R7c declined
+Actual answer: selected "Handle send failures" and "Length test" (D8 re-asked, 2026-10-03)
+Accepted scope: R7a: on Twilio send error log `send_failed` + error code, do not advance state, dashboard "unreachable" list; test: mocked 21608 leaves case at prior state with a send_failed event. R7d: unit test asserts every rendered patient template ≤ 120 chars GSM-7; CHW/supervisor SMS may be 2 segments; patient quote truncated to 60 chars. R7b declined: multiple open cases per phone stay undefined → unresolved. R7c declined: HELP reply and the reply-2 route stay undefined → unresolved (note: judges doc describes the reply-2 offer).
+History: first ask dismissed by user (D8, 2026-10-03), re-asked unchanged on resume
+Accepted scope: none
+History: none
+
+### R8: Radar and clinic-closed metrics (multi-select; each item independent)
+Finding: Section 2, P2, confidence 7/10, office-hours concerns R2-14, R2-17; reviewer: Claude (plan-eng-review)
+Plan baseline: clinic_closed rule sends "an alternative facility if it's closed for > 3 days"; radar = "6 of 11 patients" with undefined denominator and window
+Runtime evidence: unknown (no code yet)
+Comparison grid (each row independent; unselected keep Current):
+| Choice | Current | If selected |
+|---|---|---|
+| R8a closed > 3 days branch | uncomputable | drop it: always send posted hours; offer the nearest open facility with the service only when the facility is closed per its posted hours today |
+| R8b radar definition | numerator only | denominator = distinct cases with any event at that facility in the last 7 days; numerator = those with clinic_closed or turned_away there; hide n < 5 |
+Question D9:
+D9 — Which metric definitions should the plan adopt? (multi-select)
+Header: Metrics
+Options: R8a "Drop 3-day branch" · R8b "Define radar ratio" (both recommended)
+State: approved (R8a); R8b declined
+Actual answer: selected "Drop 3-day branch" (D9, 2026-10-03)
+Accepted scope: R8a: clinic_closed always sends posted hours; nearest open facility with the service is suggested only when posted hours say the facility is closed today; test: closed-today vs open-today fixtures. R8b declined: radar denominator and window stay undefined → unresolved.
+History: none
+
+### R9: Test framework
+Finding: Section 3, greenfield, no test framework detected (repo has CLAUDE.md + docs only); reviewer: Claude (plan-eng-review)
+Plan baseline: none specified
+Runtime evidence: `ls` shows no source or test files
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R9 framework | none | pytest; core.py tests table-driven over (message, role, open_prompts) → (label, action); eval.py separate, not run in unit suite | none: rely on eval.py + manual /sim runs |
+Question D10:
+D10 — Use pytest with table-driven tests for core.py?
+Header: Test framework
+Options: A) "pytest, table-driven" (recommended) · B) "No unit tests"
+State: approved
+Actual answer: A "pytest, table-driven" (D10, 2026-10-03)
+Accepted scope: pytest; tests/test_core.py with one parametrized table over (message, role, open prompts) → (route/label, action) covering the router order, guards, field validation, 12-label rules table, and the D2/D6/D8/D9 cases; eval.py separate and not part of the unit suite.
+History: none
+
+### R10: Eval held-out composition
+Finding: Section 3, office-hours concerns R2-12, R2-13; reviewer: Claude (plan-eng-review)
+Plan baseline: 150 messages, held-out 50 written by a teammate, "100% clinical recall (30/30)", wrong-action ≤ 3%
+Runtime evidence: unknown
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R10 held-out | composition unspecified; 30/30 unreachable on 50 | held-out 50 includes ≥ 15 clinical; criteria = 100% recall on held-out clinical subset, wrong actions reported as k/50 (target ≤ 1) | keep as written |
+Question D11:
+D11 — Define what the held-out 50 contains?
+Header: Eval split
+Options: A) "≥15 clinical, report k/50" (recommended) · B) "Keep as written"
+State: approved
+Actual answer: A "≥15 clinical, report k/50" (D11, 2026-10-03)
+Accepted scope: held-out 50 (written by a non-tuning teammate) includes ≥ 15 clinical messages (direct, slang, mixed, inside yes/no); criteria: 100% recall on the held-out clinical subset; wrong actions reported as k/50 with target ≤ 1. Success Criteria section amended accordingly.
+History: none
+
+### R11: Pilot hardening TODO
+Finding: final planning, shortcut ceilings of D3/D5; reviewer: Claude (plan-eng-review)
+Question D12: Add a 'pilot hardening' TODO to TODOS.md? Options: A) Add (recommended) · B) Skip · C) Build it now
+State: approved
+Actual answer: B "Skip" (D12, 2026-10-03)
+Accepted scope: none; shortcuts tracked only in the decision log (dec-6e0a360e, dec-b15e8613).
+History: none
+
+Approval readiness: PASS — checked R1 (D2), R2 (D3), R3 (D4), R4 (D5), R5c (D6), R7a/R7d (D8), R8a (D9), R9 (D10), R10 (D11), R11 (D12); unresolved: R5b, R5d, R6 (D7), R7b, R7c, R8b.
+
+## Eng review body
+
+### NOT in scope
+- Guarded transitions / multi-worker safety: deferred by D3 (single thread accepted for 48h).
+- Per-case fast-forward: declined by D5.
+- Real voice/IVR: stretch goal only, as in the approved design.
+- DB indexes: unnecessary at demo scale (≤ 100 cases).
+- TODOS.md hardening item: declined by D12.
+
+### What already exists
+- Twilio Python SDK `RequestValidator` covers webhook auth (D2); no custom crypto.
+- Twilio Messaging REST errors (21608 unverified, 21610 opted-out) give the send-failure signal for R7a.
+- Anthropic SDK structured JSON output for the classifier; enum validation stays in our code.
+- pytest parametrize for the table-driven core tests (D10). Nothing in this repo to reuse yet (greenfield).
+
+### Failure modes
+| Path | Realistic failure | Test / handling | User sees |
+|---|---|---|---|
+| /sms webhook | forged clinic "Y" | 403 via signature (D2), tested | nothing; request rejected |
+| Twilio send | 21608 unverified handset | send_failed, state unchanged (D8), tested | dashboard "unreachable" |
+| LLM call | timeout / outage | clinical timing + safety template (D6), tested | patient gets safety SMS; CHW paged |
+| Scheduler + webhook | claim and timeout collide | single thread only (D3 shortcut) | double owner if run multi-worker |
+| CHW claim | claimed, never DONE | **none (R6 unresolved)** | **silent: case sits paused forever — critical gap** |
+| Patient phone | two open cases on one phone | **none (R7b declined)** | **silent: reply applied to an arbitrary case — critical gap** |
+| HELP / reply 2 | patient texts HELP or 2 | none (R7c declined) | likely routed to classifier → unknown → CHW |
+| Radar | "6 of N" asked by judge | none (R8b declined) | number not explainable |
+
+### Worktree parallelization strategy
+| Step | Modules touched | Depends on |
+|---|---|---|
+| Core rules + tests | core.py, templates.py, tests/ | — |
+| Classifier + eval | classify.py, eval.py, eval data | — |
+| Server + data | app.py, db.py, seed.py, /sim | core.py interface |
+| Dashboard | dashboard.html, /api/state | db.py schema |
+Lane A: core rules + tests. Lane B: classifier + eval. Lane C: server + data → dashboard (after A's interface is fixed).
+Execution order: launch A + B; once core.py signatures are fixed, start C; merge all.
+Conflict flags: templates.py is shared by A and C — A owns it.
+
+## Implementation Tasks
+Synthesized from this review's findings. Each task derives from a specific finding above. Run with Claude Code or Codex; checkbox as you ship.
+
+- [ ] **T1 (P1, human: ~1h / CC: ~5min)** — app.py — Validate X-Twilio-Signature with URL rebuilt from X-Forwarded-Proto/Host
+  - Surfaced by: Architecture — A1 (D2)
+  - Files: app.py, tests/test_app.py
+  - Verify: pytest: forged → 403, signed → 200
+- [ ] **T2 (P1, human: ~4h / CC: ~20min)** — core.py — Table-driven router/guards/rules tests incl. clinical-in-YES/NO and outage → clinical timing
+  - Surfaced by: Test review — D10, D6
+  - Files: core.py, tests/test_core.py
+  - Verify: pytest tests/test_core.py
+- [ ] **T3 (P1, human: ~2h / CC: ~10min)** — app.py — Handle Twilio send errors: send_failed event, no state advance, unreachable list
+  - Surfaced by: Code quality — R7a (D8)
+  - Files: app.py, db.py, dashboard.html
+  - Verify: mocked 21608 test
+- [ ] **T4 (P2, human: ~3h / CC: ~20min)** — app.py — /sim page with patient/CHW/clinic phones posting into the same router; SIM_MODE outbound log
+  - Surfaced by: Architecture — A3 (D4)
+  - Files: app.py, sim.html
+  - Verify: same inbound via /sim and /sms produce identical events
+- [ ] **T5 (P2, human: ~30min / CC: ~5min)** — templates.py — Template length test ≤120 GSM-7, quote truncation 60
+  - Surfaced by: Code quality — R7d (D8)
+  - Files: templates.py, tests/test_templates.py
+  - Verify: pytest
+- [ ] **T6 (P2, human: ~30min / CC: ~5min)** — core.py — clinic_closed: posted hours; alternative only when closed today
+  - Surfaced by: Code quality — R8a (D9)
+  - Files: core.py, tests/test_core.py
+  - Verify: closed-today vs open-today rows
+- [ ] **T7 (P2, human: ~2h / CC: ~10min)** — eval.py — Held-out 50 with ≥15 clinical; report recall, k/50 wrong actions, accuracy, errors above/below 0.7
+  - Surfaced by: Test review — D11
+  - Files: eval.py, eval/heldout.jsonl
+  - Verify: python eval.py --heldout
+- [ ] **T8 (P3, human: ~10min / CC: ~2min)** — app.py — Mark single-thread scheduler and global clock_offset with gstack-shortcut comments; pin workers=1
+  - Surfaced by: Architecture — A2 (D3), A3 (D5)
+  - Files: app.py
+  - Verify: grep gstack-shortcut
+
+### Unresolved decisions that may bite you later
+- R6 (D7, no preference): state-machine exits — none + clinic N row, reply ordering, baton/claim timeouts, DONE target state.
+- R5b: deferred admin action trigger (claim vs DONE) still ambiguous.
+- R5d: opted-out patient with clinical message — behavior undefined.
+- R7b: multiple open cases on one phone — undefined.
+- R7c: HELP reply and the "reply 2" route — undefined (judges doc describes reply 2).
+- R8b: radar denominator and time window — undefined.
+
+### Completion summary
+- Step 0: Scope Challenge — scope accepted as-is
+- Architecture Review: 3 issues found
+- Code Quality Review: 6 issues found
+- Test Review: diagram produced, 19 gaps identified
+- Performance Review: 0 issues found
+- NOT in scope: written
+- What already exists: written
+- TODOS.md updates: 1 item proposed to user (skipped)
+- Failure modes: 2 critical gaps flagged
+- Unresolved decisions: 6 in this review
+- Outside voice: codex, unavailable (not authenticated; native fallback lacks TaskOutput)
+- Parallelization: 3 lanes, 2 parallel / 1 sequential
+- Lake Score: 1/6
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Outside Review | codex via `/plan-eng-review` | Independent 2nd opinion | 1 | unavailable | not authenticated; native fallback lacked TaskOutput |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES OPEN | 28 issues, 2 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+- **OUTSIDE COVERAGE:** codex, plan-review phase, unavailable (not authenticated); no native fallback ran. Missing coverage, not a clean pass.
+- **VERDICT:** no reviews CLEAR — eng review required (ISSUES OPEN: 6 unresolved decisions, 2 critical gaps).
+
+**UNRESOLVED DECISIONS:**
+- R6 (D7): state-machine exits (none + clinic N, reply ordering, baton/claim timeouts, DONE target state)
+- R5b: deferred admin action trigger (claim vs DONE)
+- R5d: opted-out patient with a clinical message
+- R7b: multiple open cases on one phone
+- R7c: HELP reply and reply-2 route
+- R8b: radar denominator and time window
