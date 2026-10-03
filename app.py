@@ -160,17 +160,23 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
     if chw or clinic:
         role = "chw" if chw else "clinic"
         r = core.route(body, role)
-        if role == "chw":
+        if r.kind == "unparsed":
+            # Free text from staff is not relayed; tell them the commands instead.
+            send(from_phone, templates.CHW["help"] if role == "chw" else templates.CLINIC_HELP)
+            return "unparsed"
+        if r.kind == "chw_claim":
             case = _pick(conn, "SELECT * FROM cases WHERE escalation != 'none' AND claimed_by_chw IS NULL",
                          (), r.case_id)
+        elif role == "chw":  # DONE / LOST without an id: the one case this CHW holds
+            case = _pick(conn, "SELECT * FROM cases WHERE escalation != 'none' AND claimed_by_chw = ?",
+                         (chw["id"],), r.case_id)
         else:
             case = _pick(conn, "SELECT * FROM cases WHERE facility_id = ?"
                          " AND status IN ('visit_scheduled', 'follow_up')",
                          (clinic["id"],), r.case_id)
-        if r.kind == "unparsed" or case is None:
-            reply = templates.CHW["which"] if role == "chw" else templates.STAFF_WHICH
-            send(from_phone, reply)
-            return r.kind if r.kind == "unparsed" else "which"
+        if case is None:
+            send(from_phone, templates.CHW["which"] if role == "chw" else templates.STAFF_WHICH)
+            return "which"
         cid = case["id"]
         db.log_event(conn, cid, ts, role, "inbound", body=body, route=r.kind)
         if r.kind == "chw_claim":
@@ -181,12 +187,17 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
                 db.update_case(conn, cid, claimed_by_chw=chw["id"])
                 send_sms(conn, send, cid, from_phone,
                          templates.render(templates.CHW, "claimed", case_id=cid), now)
+        elif r.kind in ("chw_done", "chw_lost") and case["escalation"] == "none":
+            send_sms(conn, send, cid, from_phone,
+                     templates.render(templates.CHW, "not_open", case_id=cid), now)
         elif r.kind == "chw_done":
             status = "visit_scheduled" if case["visit_date"] else "action_taken"
             db.update_case(conn, cid, escalation="none", claimed_by_chw=None,
                            status=status, awaiting="free_text")
+            send_sms(conn, send, cid, from_phone, templates.render(templates.CHW, "done", case_id=cid), now)
         elif r.kind == "chw_lost":
             db.update_case(conn, cid, status="lost", escalation="none", awaiting=None)
+            send_sms(conn, send, cid, from_phone, templates.render(templates.CHW, "lost", case_id=cid), now)
         elif r.kind == "clinic_seen":
             db.complete_case(conn, cid, "clinic", ts)
         elif r.kind == "clinic_not_seen":

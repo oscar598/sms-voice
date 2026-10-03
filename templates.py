@@ -40,9 +40,13 @@ CHW = {
     "claimed": "{case_id} is yours. Reply DONE {case_id} or LOST {case_id} when finished.",
     "which": "Which case? Reply with the case id, e.g. 1 R-0142.",
     "not_open": "{case_id} has nothing waiting for a health worker.",
+    "done": "{case_id} closed. Automated follow-up for the patient resumes.",
+    "lost": "{case_id} marked lost. No more messages will go to the patient.",
+    "help": "Commands: 1 R-0142 to take a case, DONE R-0142 when finished, LOST R-0142 if unreachable. Call the patient to talk.",
 }
 
 STAFF_WHICH = "Which case? Reply with the case id, e.g. Y R-0142."
+CLINIC_HELP = "Reply Y R-0142 if the patient was seen, N R-0142 if not."
 
 
 def render(table, key, **slots):

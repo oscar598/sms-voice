@@ -147,3 +147,46 @@ def test_sim_routes_absent_outside_sim_mode():
     client = app.test_client()
     assert client.post("/sim/send", json={"from": PATIENT, "body": "x"}).status_code == 404
     assert client.get("/sim").status_code == 404
+
+
+# ------------------------------------------------------------ CHW / clinic replies
+
+def escalated_and_claimed():
+    client, conn = make()
+    client.post("/sim/referral")
+    sim(client, PATIENT, "my chest hurts")
+    sim(client, CHW, "1 R-0142")
+    return client, conn
+
+
+@pytest.mark.parametrize("cmd", ["DONE R-0142", "done"], ids=["with id", "bare DONE finds the claimed case"])
+def test_chw_done_is_confirmed(cmd):
+    client, conn = escalated_and_claimed()
+    assert sim(client, CHW, cmd) == "chw_done"
+    assert outbox(client, CHW)[-1] == "R-0142 closed. Automated follow-up for the patient resumes."
+    assert db.get_case(conn, "R-0142")["escalation"] == "none"
+
+
+def test_chw_lost_is_confirmed():
+    client, conn = escalated_and_claimed()
+    sim(client, CHW, "LOST R-0142")
+    assert outbox(client, CHW)[-1].startswith("R-0142 marked lost")
+    assert db.get_case(conn, "R-0142")["status"] == "lost"
+
+
+def test_chw_done_on_case_with_nothing_open():
+    client, conn = escalated_and_claimed()
+    sim(client, CHW, "DONE R-0142")
+    sim(client, CHW, "DONE R-0142")
+    assert outbox(client, CHW)[-1] == "R-0142 has nothing waiting for a health worker."
+
+
+@pytest.mark.parametrize("phone,expected", [
+    (CHW, "Commands: 1 R-0142 to take a case"),
+    (CLINIC, "Reply Y R-0142 if the patient was seen"),
+], ids=["chw free text", "clinic free text"])
+def test_staff_free_text_gets_the_commands(phone, expected):
+    client, conn = make()
+    client.post("/sim/referral")
+    assert sim(client, phone, "hellO?") == "unparsed"
+    assert outbox(client, phone)[-1].startswith(expected)
