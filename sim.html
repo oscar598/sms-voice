@@ -39,6 +39,8 @@
 <header>
   <h1>Referral Sim <span id="mode" style="color:var(--quiet);font-weight:400">· SIM_MODE, no real SMS</span></h1>
   <button class="primary" id="refer">Create referral R-0142</button>
+  <button id="ff1">+1 day</button>
+  <button id="ff2">+2 days</button>
   <span id="status">No case yet</span>
 </header>
 <main id="phones"></main>
@@ -66,7 +68,7 @@ function phoneCard(role, label, number, sub) {
 }
 
 async function refresh() {
-  const { messages, case: c } = await (await fetch("/sim/transcript")).json();
+  const { messages, case: c, now } = await (await fetch("/sim/transcript")).json();
   for (const [role] of PHONES) {
     const log = document.getElementById(`log-${role}`);
     const mine = messages.filter((m) => m.phone === cfg[role]);
@@ -82,6 +84,7 @@ async function refresh() {
   document.getElementById("status").textContent = c
     ? `${c.id} · ${c.status} · escalation: ${c.escalation}${c.visit_date ? " · visit " + c.visit_date : ""}`
     : "No case yet";
+  document.getElementById("status").textContent += ` · clock ${now.slice(0, 16).replace("T", " ")}`;
 }
 
 (async () => {
@@ -94,6 +97,13 @@ async function refresh() {
     await fetch("/sim/referral", { method: "POST" });
     refresh();
   });
+  for (const [id, days] of [["ff1", 1], ["ff2", 2]]) {
+    document.getElementById(id).addEventListener("click", async () => {
+      await fetch("/sim/fast-forward", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ days }) });
+      refresh();
+    });
+  }
   refresh();
   setInterval(refresh, 1500);
 })();

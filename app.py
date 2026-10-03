@@ -6,7 +6,7 @@ and rules land in core.py (T2); /sms only acknowledges for now.
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, request
@@ -16,6 +16,7 @@ from twilio.request_validator import RequestValidator
 import classify
 import core
 import db
+import scheduler
 import seed
 import templates
 
@@ -152,7 +153,8 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
             case = _pick(conn, "SELECT * FROM cases WHERE escalation != 'none' AND claimed_by_chw IS NULL",
                          (), r.case_id)
         else:
-            case = _pick(conn, "SELECT * FROM cases WHERE facility_id = ? AND status = 'visit_scheduled'",
+            case = _pick(conn, "SELECT * FROM cases WHERE facility_id = ?"
+                         " AND status IN ('visit_scheduled', 'follow_up')",
                          (clinic["id"],), r.case_id)
         if r.kind == "unparsed" or case is None:
             reply = templates.CHW["which"] if role == "chw" else templates.STAFF_WHICH
@@ -176,7 +178,10 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
             db.update_case(conn, cid, status="lost", escalation="none", awaiting=None)
         elif r.kind == "clinic_seen":
             db.update_case(conn, cid, status="completed", completed_by="clinic", awaiting=None)
-        # clinic_not_seen: logged only; follow-up resolution rules are not built.
+        elif r.kind == "clinic_not_seen":
+            db.log_event(conn, cid, ts, "clinic", "clinic_not_seen")
+            if db.last_event(conn, cid, ["patient_yes"]):  # patient YES + clinic N: conflict
+                _escalate(conn, send, case, "non_clinical", "[patient said YES, clinic said N]", now, data)
         conn.commit()
         return r.kind
 
@@ -186,6 +191,7 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
     cid = case["id"]
     r = core.route(body, "patient", case, case["awaiting"])
     db.log_event(conn, cid, ts, "patient", "inbound", body=body, route=r.kind)
+    db.update_case(conn, cid, reminder_count=0)  # any reply resets the reminder count
     facility = data.FACILITY_BY_ID[case["facility_id"]]
 
     if r.kind == "clinical":
@@ -198,9 +204,17 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
         db.update_case(conn, cid, opted_out=0, awaiting="free_text")
     elif r.kind == "holding":
         send_sms(conn, send, cid, case["patient_phone"], templates.PATIENT["holding"], now)
-    elif r.kind in ("yes", "no"):
-        # Follow-up resolution (scheduler + rules) is not built; record the answer.
+    elif r.kind == "yes":
+        # Seen, per the patient. Clinic Y completes now; clinic silence for 48 h
+        # completes as patient-reported (scheduler); clinic N is a conflict.
         db.update_case(conn, cid, awaiting=None)
+        db.log_event(conn, cid, ts, "patient", "patient_yes")
+        if db.last_event(conn, cid, ["clinic_not_seen"]):
+            _escalate(conn, send, case, "non_clinical", "[patient said YES, clinic said N]", now, data)
+    elif r.kind == "no":
+        db.update_case(conn, cid, status="barrier_found", awaiting="free_text")
+        db.log_event(conn, cid, ts, "patient", "patient_no")
+        send_sms(conn, send, cid, case["patient_phone"], templates.PATIENT["what_happened"], now)
     elif r.kind == "classify":
         try:
             raw, error = classify_fn(body, today), False
@@ -260,11 +274,28 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
     app = Flask(__name__)
     validator = RequestValidator(token)
     conn = conn or db.connect(os.environ.get("DB_PATH", "referrals.db"))
-    now_fn = now_fn or datetime.now
+    base_now = now_fn or datetime.now
+    # gstack-shortcut(dec-b15e8613): fast-forward moves ONE clock for every case, so
+    # all seeded timers fire together and may send stray SMS on stage; upgrade
+    # (per-case fast-forward) when a rehearsal shows stray SMS or dashboard jumps.
+    clock = {"offset": timedelta(0)}
+
+    def now_fn():
+        return base_now() + clock["offset"]
+
     transcript = []
     if sender is None:
         # SIM_MODE never talks to Twilio: outbound lands in the on-screen transcript.
         sender = sim_sender(transcript) if sim_mode else _twilio_from_env()
+
+    @app.before_request
+    def run_due_timers():
+        # Same thread as the request (D3): polling from /sim and the dashboard
+        # drives the timers. A timer failure must never break an inbound SMS.
+        try:
+            scheduler.tick(conn, sender, now_fn(), seed)
+        except Exception:
+            app.logger.exception("scheduler tick failed")
 
     def signature_ok():
         signature = request.headers.get("X-Twilio-Signature", "")
@@ -313,7 +344,14 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
         @app.get("/sim/transcript")
         def sim_transcript():
             case = db.get_case(conn, seed.DEMO_CASE["id"])
-            return jsonify({"messages": transcript, "case": case})
+            return jsonify({"messages": transcript, "case": case, "now": now_fn().isoformat()})
+
+        @app.post("/sim/fast-forward")
+        def sim_fast_forward():
+            days = float(request.get_json(force=True).get("days", 1))
+            clock["offset"] += timedelta(days=days)
+            applied = scheduler.tick(conn, sender, now_fn(), seed)
+            return jsonify({"now": now_fn().isoformat(), "applied": applied})
 
     return app
 

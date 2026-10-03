@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS cases (
     claimed_by_chw TEXT,
     opted_out INTEGER NOT NULL DEFAULT 0,
     completed_by TEXT,
-    awaiting TEXT            -- open prompt: 'free_text' | 'yes_no' | NULL
+    awaiting TEXT,           -- open prompt: 'free_text' | 'yes_no' | NULL
+    reminder_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +60,7 @@ def set_status(conn, case_id, status):
 
 UPDATABLE = {
     "status", "visit_date", "escalation", "latest_barrier", "claimed_by_chw",
-    "opted_out", "completed_by", "awaiting", "facility_id",
+    "opted_out", "completed_by", "awaiting", "facility_id", "reminder_count",
 }
 
 
@@ -90,6 +91,20 @@ def events(conn, case_id=None):
     if case_id:
         q, args = q + " WHERE case_id = ?", (case_id,)
     return [dict(r) for r in conn.execute(q + " ORDER BY id", args)]
+
+
+def last_event(conn, case_id, kinds, to=None, actor=None):
+    """Most recent event of the given kinds, optionally to a phone / from an actor."""
+    q = f"SELECT * FROM events WHERE case_id = ? AND kind IN ({','.join('?' for _ in kinds)})"
+    args = [case_id, *kinds]
+    if to:
+        q += " AND json_extract(payload_json, '$.to') = ?"
+        args.append(to)
+    if actor:
+        q += " AND actor = ?"
+        args.append(actor)
+    row = conn.execute(q + " ORDER BY id DESC LIMIT 1", args).fetchone()
+    return dict(row) if row else None
 
 
 def log_event(conn, case_id, ts, actor, kind, barrier=None, facility_id=None, **payload):

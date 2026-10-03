@@ -50,8 +50,9 @@ def test_patient_template_fits_one_segment(key):
     assert set(sms) <= GSM7, f"non-GSM-7: {set(sms) - GSM7}"
 
 
-def test_clinic_template_fits_one_segment():
-    sms = templates.render(templates.CLINIC, "arriving", case_id="R-9999", date=DATE)
+@pytest.mark.parametrize("key", sorted(templates.CLINIC))
+def test_clinic_template_fits_one_segment(key):
+    sms = templates.render(templates.CLINIC, key, case_id="R-9999", date=DATE)
     assert len(sms) <= CLINIC_MAX and set(sms) <= GSM7
 
 

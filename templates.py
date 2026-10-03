@@ -24,10 +24,14 @@ PATIENT = {
     "holding": "Sorry, replies are slow right now. A health worker will get back to you.",
 }
 
+PATIENT["followup"] = "Did you get seen at {name}? Reply YES or NO."
+PATIENT["reminder"] = "Is anything stopping you from going to {name}? Reply here."
+PATIENT["what_happened"] = "Sorry to hear that. What got in the way? Reply here."
 PATIENT["intro"] = "Hi! You were referred to {name} for {service}. Is anything stopping you from going? Reply here."
 
 CLINIC = {
     "arriving": "{case_id} arriving {date}. Reply Y {case_id} when seen.",
+    "followup": "Was {case_id} seen? Reply Y {case_id} or N {case_id}.",
 }
 
 CHW = {
