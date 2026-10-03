@@ -5,7 +5,9 @@ valid X-Twilio-Signature (design doc, ledger R1 / D2). Routing, classification
 and rules land in core.py (T2); /sms only acknowledges for now.
 """
 
+import hmac
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -237,6 +239,40 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
     return r.kind
 
 
+OPEN_CASE_MSG = "This phone already has an open referral."
+KENYAN_MOBILE = re.compile(r"^\+254[17]\d{8}$")
+
+
+def next_case_id(conn):
+    row = conn.execute("SELECT MAX(CAST(SUBSTR(id, 3) AS INTEGER)) FROM cases WHERE id LIKE 'R-%'").fetchone()
+    return core.case_id((row[0] or 0) + 1)
+
+
+def validate_referral(payload, conn, data=seed):
+    """Check a new-referral request. Returns (case fields, errors by field)."""
+    payload = payload if isinstance(payload, dict) else {}
+    errors = {}
+    phone = re.sub(r"[\s-]", "", str(payload.get("patient_phone", "")))
+    if phone.startswith("07") or phone.startswith("01"):
+        phone = "+254" + phone[1:]
+    if not KENYAN_MOBILE.match(phone):
+        errors["patient_phone"] = "Use a Kenyan mobile number, e.g. +254712345678 or 0712345678."
+    elif db.open_case_for_phone(conn, phone):
+        errors["patient_phone"] = OPEN_CASE_MSG
+    fac = data.FACILITY_BY_ID.get(payload.get("facility_id"))
+    if not fac:
+        errors["facility_id"] = "Pick one of the listed facilities."
+    service = payload.get("service")
+    if fac and service not in fac["services"]:
+        errors["service"] = f"{fac['name']} offers: {', '.join(fac['services'])}."
+    area = payload.get("area") or (fac["area"] if fac else None)
+    if area not in data.AREAS:
+        errors["area"] = f"Pick one of: {', '.join(data.AREAS)}."
+    case = {"patient_phone": phone, "service": service, "facility_id": payload.get("facility_id"),
+            "patient_area": area}
+    return case, errors
+
+
 def sim_sender(transcript):
     """SIM_MODE sender: outbound goes to the on-screen transcript, never Twilio."""
     sent = []
@@ -330,14 +366,45 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
 
     dashboard_origin = os.environ.get("DASHBOARD_ORIGIN", "*")
 
+    referral_token = os.environ.get("REFERRAL_TOKEN", "")
+
+    @app.get("/api/facilities")
+    def facilities():
+        return jsonify([{k: f[k] for k in ("id", "name", "area", "services", "hours_text")}
+                        for f in seed.FACILITIES])
+
+    @app.post("/api/referrals")
+    def create_referral():
+        # Creates a case and texts a patient, so unlike the read-only /api/* routes
+        # it needs the shared secret. Unset REFERRAL_TOKEN = endpoint off.
+        if not referral_token:
+            return jsonify({"error": "REFERRAL_TOKEN is not set on the server"}), 503
+        given = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(given.encode(), referral_token.encode()):
+            return jsonify({"error": "missing or wrong referral token"}), 401
+        fields, errors = validate_referral(request.get_json(silent=True), conn)
+        if errors:
+            return jsonify({"errors": errors}), 409 if errors.get("patient_phone") == OPEN_CASE_MSG else 400
+        fields["id"] = next_case_id(conn)
+        start_referral(conn, sender, fields, now_fn())
+        case = db.get_case(conn, fields["id"])
+        return jsonify({"case": case, "intro_sent": case["status"] == "contacted"}), 201
+
+    @app.get("/referrals/new")
+    def referral_form():
+        return Response((Path(__file__).parent / "referral.html").read_text(), mimetype="text/html")
+
     @app.after_request
-    def cors_for_read_api(resp):
-        # The hosted dashboard (Lovable) reads /api/* from another origin. GET only;
-        # nothing under /api writes. Set DASHBOARD_ORIGIN to the Lovable URL to lock it down.
+    def cors_for_api(resp):
+        # The hosted dashboard (Lovable) calls /api/* from another origin. Reads are
+        # open; /api/referrals also accepts POST and needs the Authorization header.
+        # Set DASHBOARD_ORIGIN to the Lovable URL to lock it down.
         if request.path.startswith("/api/"):
+            writes = request.path == "/api/referrals"
             resp.headers["Access-Control-Allow-Origin"] = dashboard_origin
-            resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-            resp.headers["Access-Control-Allow-Headers"] = "Content-Type, ngrok-skip-browser-warning"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS" if writes else "GET, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, ngrok-skip-browser-warning" + (", Authorization" if writes else ""))
         return resp
 
     if sim_mode:

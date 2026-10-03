@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New Referral</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --ink:#1d1d1b; --quiet:#6b6a66; --line:#dcdad4;
+          --accent:#2f5d9e; --bad:#a33a2a; --good:#2e6b3a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --card:#1f1f1d; --ink:#ecebe6; --quiet:#a3a19a; --line:#3a3936;
+            --accent:#8fb3ec; --bad:#e8857a; --good:#8fcf9b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:480px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  p.lead { color:var(--quiet); margin:0 0 20px; }
+  form { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px;
+         display:grid; gap:14px; }
+  label { display:grid; gap:4px; font-weight:600; font-size:14px; }
+  label small { font-weight:400; color:var(--quiet); }
+  input, select { font:inherit; padding:8px 10px; border-radius:8px; border:1px solid var(--line);
+                  background:var(--bg); color:var(--ink); width:100%; }
+  .err { color:var(--bad); font-weight:400; font-size:13px; min-height:0; }
+  button { font:inherit; font-weight:600; padding:10px 14px; border-radius:8px; border:0;
+           background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  #result { margin-top:16px; padding:12px; border-radius:10px; border:1px solid var(--line);
+            background:var(--card); display:none; }
+  #result.ok { border-color:var(--good); }
+  #result.bad { border-color:var(--bad); }
+  details { margin-top:16px; color:var(--quiet); font-size:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>New referral</h1>
+  <p class="lead">Creates the case and sends the patient their first SMS.</p>
+  <form id="f" novalidate>
+    <label>Patient phone
+      <input name="patient_phone" inputmode="tel" autocomplete="off" placeholder="0712 345 678" required>
+      <span class="err" data-for="patient_phone"></span>
+    </label>
+    <label>Facility
+      <select name="facility_id" required></select>
+      <span class="err" data-for="facility_id"></span>
+    </label>
+    <label>Service
+      <select name="service" required></select>
+      <span class="err" data-for="service"></span>
+    </label>
+    <label>Patient's area <small>defaults to the facility's area</small>
+      <select name="area"></select>
+      <span class="err" data-for="area"></span>
+    </label>
+    <button id="submit">Create referral</button>
+  </form>
+  <div id="result" role="status"></div>
+  <details>
+    <summary>Referral token</summary>
+    <label style="margin-top:8px">Token <small>set by the server's REFERRAL_TOKEN; kept in this browser only</small>
+      <input id="token" type="password" autocomplete="off">
+    </label>
+  </details>
+</main>
+<script>
+const f = document.getElementById("f");
+const tokenEl = document.getElementById("token");
+const result = document.getElementById("result");
+let facilities = [];
+
+try { tokenEl.value = localStorage.getItem("referralToken") || ""; } catch (e) {}
+tokenEl.addEventListener("change", () => { try { localStorage.setItem("referralToken", tokenEl.value); } catch (e) {} });
+
+function fillServices() {
+  const fac = facilities.find((x) => x.id === f.facility_id.value);
+  f.service.replaceChildren(...(fac ? fac.services : []).map((s) => new Option(s, s)));
+  if (fac) f.area.value = fac.area;
+}
+
+(async () => {
+  facilities = await (await fetch("/api/facilities")).json();
+  f.facility_id.replaceChildren(...facilities.map((x) => new Option(`${x.name} (${x.area})`, x.id)));
+  const areas = [...new Set(facilities.map((x) => x.area))].sort();
+  f.area.replaceChildren(...areas.map((a) => new Option(a, a)));
+  f.facility_id.addEventListener("change", fillServices);
+  fillServices();
+})();
+
+f.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  document.querySelectorAll(".err").forEach((el) => (el.textContent = ""));
+  result.style.display = "none";
+  const btn = document.getElementById("submit");
+  btn.disabled = true;
+  try {
+    const body = Object.fromEntries(new FormData(f));
+    const r = await fetch("/api/referrals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + tokenEl.value },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    result.style.display = "block";
+    if (r.status === 201) {
+      result.className = "ok";
+      result.textContent = data.intro_sent
+        ? `Created ${data.case.id}. The patient has been texted.`
+        : `Created ${data.case.id}, but the first SMS failed. It's on the dashboard's unreachable list.`;
+      f.patient_phone.value = "";
+    } else if (data.errors) {
+      result.className = "bad";
+      result.textContent = "Fix the highlighted fields.";
+      for (const [k, v] of Object.entries(data.errors)) {
+        const el = document.querySelector(`.err[data-for="${k}"]`);
+        if (el) el.textContent = v;
+      }
+    } else {
+      result.className = "bad";
+      result.textContent = r.status === 401 ? "Wrong or missing referral token (see below)." : data.error;
+      if (r.status === 401) document.querySelector("details").open = true;
+    }
+  } catch (err) {
+    result.style.display = "block";
+    result.className = "bad";
+    result.textContent = "Couldn't reach the server.";
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

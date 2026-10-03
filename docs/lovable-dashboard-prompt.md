@@ -14,3 +14,19 @@ LAYOUT, top to bottom:
 6. "Cases": table of cases (id, facility, status, escalation, latest_barrier, visit_date). Status as colored chips: completed green, lost grey, escalated amber, others neutral.
 
 STYLE: calm, clinical, high contrast, works in light and dark mode, responsive down to 375px width. No emoji.
+
+---
+
+FOLLOW-UP PROMPT (send after the dashboard is built):
+
+Add a "New referral" button in the header that opens a dialog with a form:
+- Patient phone (text, e.g. 0712 345 678)
+- Facility (select, options from GET {API_BASE}/api/facilities: [{id, name, area, services, hours_text}], label "<name> (<area>)")
+- Service (select, options = the chosen facility's services)
+- Patient's area (select of the distinct facility areas, defaults to the chosen facility's area)
+- Referral token (password field in the settings area next to API_BASE, stored in localStorage)
+
+On submit, POST {API_BASE}/api/referrals with JSON {patient_phone, facility_id, service, area} and headers "Content-Type: application/json", "Authorization: Bearer <token>", "ngrok-skip-browser-warning: 1".
+- 201 -> {case: {id, ...}, intro_sent: bool}: close the dialog and toast "Created <id>. The patient has been texted." (or, if intro_sent is false, "Created <id>, but the first SMS failed. See Unreachable patients.").
+- 400 or 409 -> {errors: {field: message}}: show each message under its field.
+- 401 -> "Wrong or missing referral token." 503 -> "Referrals are turned off on the server."
