@@ -8,7 +8,7 @@ Patient templates must stay within one GSM-7 segment under the trial prefix
 PATIENT = {
     "transport": "To reach {name}: {transport_note}. Address: {address}.",
     "clinic_hours": "{name} is open {hours}. Reply here if you still can't get seen.",
-    "clinic_alternative": "{name} is closed today. {alt_name} offers this, open {alt_hours}. {alt_address}.",
+    "clinic_alternative": "Closed today. Try {alt_name}, {alt_address}. Open {alt_hours}.",
     "turned_away": "We've told {name} you're coming on {date}.",
     "missing_documents": "For {name} bring: {required_docs}.",
     "scheduling": "Book at {name}: call {phone}, open {hours}.",
