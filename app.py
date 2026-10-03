@@ -7,10 +7,56 @@ and rules land in core.py (T2); /sms only acknowledges for now.
 
 import os
 
-from flask import Flask, Response, abort, request
+from flask import Flask, Response, abort, jsonify, request
+from twilio.base.exceptions import TwilioRestException
 from twilio.request_validator import RequestValidator
 
+import db
+
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+
+
+class SendError(Exception):
+    def __init__(self, code):
+        super().__init__(f"send failed: {code}")
+        self.code = code
+
+
+def twilio_sender(client, from_number):
+    """Adapt a Twilio client to `sender(to, body) -> sid`, raising SendError.
+
+    Trial accounts reject unverified numbers (21608); opted-out numbers
+    raise 21610. Network failures surface as 'network'.
+    """
+    def send(to, body):
+        try:
+            return client.messages.create(to=to, from_=from_number, body=body).sid
+        except TwilioRestException as e:
+            raise SendError(e.code or e.status) from e
+        except OSError as e:
+            raise SendError("network") from e
+    return send
+
+
+def send_sms(conn, sender, case_id, to, body, now, advance_to=None):
+    """Send one SMS; only a confirmed send may advance the case (D8 / R7a).
+
+    On failure the case keeps its status and a `send_failed` event records the
+    code, so the dashboard lists the patient as unreachable instead of
+    'contacted'. Returns True when the message was accepted.
+    """
+    ts = now.isoformat()
+    try:
+        sid = sender(to, body)
+    except SendError as e:
+        db.log_event(conn, case_id, ts, "agent", "send_failed", to=to, code=e.code)
+        conn.commit()
+        return False
+    db.log_event(conn, case_id, ts, "agent", "sent", to=to, sid=sid)
+    if advance_to:
+        db.set_status(conn, case_id, advance_to)
+    conn.commit()
+    return True
 
 
 def public_url(req):
@@ -26,7 +72,7 @@ def public_url(req):
     return f"{proto}://{host}{req.path}" + (f"?{query}" if query else "")
 
 
-def create_app(auth_token=None):
+def create_app(auth_token=None, conn=None):
     token = auth_token or os.environ.get("TWILIO_AUTH_TOKEN")
     if not token:
         # Without the token every signature check fails; refuse to start
@@ -35,6 +81,7 @@ def create_app(auth_token=None):
 
     app = Flask(__name__)
     validator = RequestValidator(token)
+    conn = conn or db.connect(os.environ.get("DB_PATH", "referrals.db"))
 
     def signature_ok():
         signature = request.headers.get("X-Twilio-Signature", "")
@@ -47,6 +94,10 @@ def create_app(auth_token=None):
         if not signature_ok():
             abort(403)
         return Response(EMPTY_TWIML, mimetype="text/xml")
+
+    @app.get("/api/state")
+    def state():
+        return jsonify({"unreachable": db.unreachable(conn)})
 
     return app
 

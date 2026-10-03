@@ -1,6 +1,7 @@
 import pytest
 from twilio.request_validator import RequestValidator
 
+import db
 from app import create_app
 
 TOKEN = "test-auth-token"
@@ -14,7 +15,7 @@ def sign(url, form):
 
 @pytest.fixture
 def client():
-    return create_app(auth_token=TOKEN).test_client()
+    return create_app(auth_token=TOKEN, conn=db.connect()).test_client()
 
 
 # (case, headers, signed_url, signed_form, expected_status)
