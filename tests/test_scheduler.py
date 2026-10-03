@@ -144,3 +144,25 @@ def test_fast_forward_drives_followup_in_sim():
     assert ["R-0142", "followup"] in r["applied"]
     client.post("/sim/send", json={"from": CLINIC, "body": "Y R-0142"})
     assert db.get_case(conn, "R-0142")["status"] == "completed"
+
+
+# ------------------------------------------------------------ STOP (T9, R5d)
+
+def test_opted_out_patient_gets_no_followup_but_clinic_does(env):
+    schedule_visit(env)
+    inbound(env, PATIENT, "STOP", T0 + H)
+    assert tick(env, FU) == [("R-0142", "followup")]
+    assert env[1].to(PATIENT) == [env[1].to(PATIENT)[0]]          # only the intro, before STOP
+    assert env[1].to(CLINIC)[-1].startswith("Was R-0142 seen?")
+
+
+def test_send_path_refuses_opted_out_patient(env):
+    from app import send_sms
+    conn, out = env
+    db.update_case(conn, "R-0142", opted_out=1)
+    before = len(out.sent)
+    assert send_sms(conn, out, "R-0142", PATIENT, "any feature's SMS", T0 + D) is False
+    assert len(out.sent) == before
+    assert db.last_event(conn, "R-0142", ["suppressed_opted_out"])["payload_json"] == f'{{"to": "{PATIENT}"}}'
+    # Staff phones on the same case are unaffected.
+    assert send_sms(conn, out, "R-0142", CHW, "baton", T0 + D) is True

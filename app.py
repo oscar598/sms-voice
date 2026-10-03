@@ -51,8 +51,16 @@ def send_sms(conn, sender, case_id, to, body, now, advance_to=None):
     On failure the case keeps its status and a `send_failed` event records the
     code, so the dashboard lists the patient as unreachable instead of
     'contacted'. Returns True when the message was accepted.
+
+    STOP is enforced here, the one path every SMS takes (R5d): nothing goes
+    to the phone of an opted-out patient, whichever feature asked.
     """
     ts = now.isoformat()
+    case = db.get_case(conn, case_id)
+    if case and case["opted_out"] and to == case["patient_phone"]:
+        db.log_event(conn, case_id, ts, "agent", "suppressed_opted_out", to=to)
+        conn.commit()
+        return False
     try:
         sid = sender(to, body)
     except SendError as e:
