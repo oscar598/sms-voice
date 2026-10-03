@@ -131,7 +131,13 @@ def _pick(conn, sql, args, explicit_id):
 
 
 def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=seed):
-    """Single entry for /sms and /sim: route, decide, act. Returns the route kind."""
+    """Single entry for /sms and /sim: route, decide, act. Returns the route kind.
+
+    Reads a case, then writes it, with no guard against a concurrent change.
+    """
+    # gstack-shortcut(dec-6e0a360e): correct only with one worker thread (no guarded
+    # UPDATEs on case transitions), upgrade when running >1 worker, a separate
+    # scheduler process, or any background thread that touches cases.
     classify_fn = classify_fn or classify.classify
     ts = now.isoformat()
     today = now.date()
@@ -313,5 +319,7 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
 
 
 if __name__ == "__main__":
-    # One worker, one thread: the scheduler (later) shares this process (D3).
+    # gstack-shortcut(dec-6e0a360e): one worker, one thread is what keeps case
+    # transitions race-free; upgrade (guarded UPDATEs) before threaded=True,
+    # gunicorn/uvicorn workers > 1, or a scheduler thread.
     create_app().run(port=int(os.environ.get("PORT", "5000")), threaded=False)

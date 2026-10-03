@@ -770,6 +770,7 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: Architecture — A2 (D3), A3 (D5)
   - Files: app.py
   - Verify: grep gstack-shortcut
+  - Build note (2026-10-03): D3 markers added in app.py (handle_inbound, `__main__`). No scheduler or `clock_offset` exists yet (no task built follow-ups, reminders or no-response timers), so the D5 marker (dec-b15e8613) is deferred to whoever builds the scheduler.
 
 ### Unresolved decisions that may bite you later
 - R5b: deferred admin action trigger (claim vs DONE) still ambiguous.
