@@ -183,6 +183,28 @@ def test_decide(cid, label, fields, urgent, fac, service, today, template, escal
     core.render_plan(p)  # every plan renders with no missing slot
 
 
+SAT = date(2026, 10, 10)
+
+ALTERNATIVE_CASES = [
+    # (id, closed facility, service, today, expected alternative name)
+    # Sunday: FAC-A (lab) is closed too, so only 24 h FAC-D may be suggested.
+    ("skips a closed alternative", "FAC-B", "lab", SUN, "Demo Faraja Hospital"),
+    # Saturday: FAC-A opens 8-12 and is listed first; it must win over FAC-D.
+    ("open alternative in list order", "FAC-B", "lab", SAT, "Demo Mto Health Centre"),
+]
+
+
+@pytest.mark.parametrize("cid,fac,service,today,alt_name", ALTERNATIVE_CASES, ids=[c[0] for c in ALTERNATIVE_CASES])
+def test_closed_today_suggests_an_open_facility(cid, fac, service, today, alt_name):
+    case = {"id": "R-0142", "service": service, "area": BY_ID[fac]["area"]}
+    p = core.decide(core.Classification("clinic_closed"), case, BY_ID[fac], FACILITIES, today, EMERGENCY)
+    key, slots = p.patient
+    assert key == "clinic_alternative"
+    assert slots["alt_name"] == alt_name
+    alt = next(f for f in FACILITIES if f["name"] == alt_name)
+    assert core.is_open_on(alt, today) and service in alt["services"]
+
+
 def test_clinical_sms_uses_only_table_facts():
     case = {"id": "R-0142", "service": "hiv", "area": "Kayole"}
     p = core.decide(core.Classification("clinical_symptom", urgent=True), case, BY_ID["FAC-A"], FACILITIES, MON, EMERGENCY)
