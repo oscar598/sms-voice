@@ -23,6 +23,7 @@ from pathlib import Path
 
 import classify
 import core
+import envfile
 import seed
 
 EVAL_DIR = Path(__file__).parent / "eval"
@@ -30,7 +31,7 @@ TODAY = date(2026, 10, 5)  # fixed so gold return dates stay correct
 CASE = {"id": "R-EVAL", "service": "lab", "area": "Embakasi", "facility_id": "FAC-B"}
 CONFIDENCE_FLOOR = core.CONFIDENCE_FLOOR
 HELDOUT_MIN_CLINICAL = 15
-EVAL_TIMEOUT_S = 30.0  # long enough to measure real latency; compared to the 3 s budget below
+EVAL_TIMEOUT_S = 30.0  # long enough to measure real latency; compared to classify.timeout_s() below
 
 
 @dataclass
@@ -171,6 +172,7 @@ def main(argv=None):
     ap.add_argument("set", choices=["tuning", "heldout"])
     ap.add_argument("--limit", type=int)
     args = ap.parse_args(argv)
+    envfile.load()  # ANTHROPIC_API_KEY etc. from .env, unless already set
 
     rows = load(args.set)[: args.limit]
     fn = live_classifier()
@@ -184,7 +186,7 @@ def main(argv=None):
     with out.open("w") as f:
         for r in results:
             f.write(json.dumps({**asdict(r), "wrong_action": r.wrong_action}, ensure_ascii=False) + "\n")
-    print_report(args.set, summarize(results, classify.TIMEOUT_S))
+    print_report(args.set, summarize(results, classify.timeout_s()))
     print(f"\n  per-message results: {out}")
 
 

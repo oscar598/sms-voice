@@ -13,8 +13,12 @@ from datetime import date
 import anthropic
 
 MODEL = os.environ.get("CLASSIFY_MODEL", "claude-opus-5-5")
-# Design budget: 3 s so the SMS round trip stays under 5 s (success criteria).
-TIMEOUT_S = float(os.environ.get("CLASSIFY_TIMEOUT", "3.0"))
+# Live calls measured 2.5-3.5 s (2026-10-03), so the original 3 s budget timed
+# out about half the time. 6 s keeps most SMS replies near the 5 s goal.
+
+
+def timeout_s():
+    return float(os.environ.get("CLASSIFY_TIMEOUT", "6.0"))
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 BARRIERS = [
@@ -89,7 +93,7 @@ def _default_client():
     global _client
     if _client is None:
         # No SDK retries: each retry would add another full timeout to the SMS reply.
-        _client = anthropic.Anthropic(timeout=TIMEOUT_S, max_retries=0)
+        _client = anthropic.Anthropic(timeout=timeout_s(), max_retries=0)
     return _client
 
 

@@ -449,7 +449,10 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
 
 
 if __name__ == "__main__":
+    import envfile
+
+    envfile.load()  # ANTHROPIC_API_KEY, REFERRAL_TOKEN etc. from .env, unless already set
     # gstack-shortcut(dec-6e0a360e): one worker, one thread is what keeps case
     # transitions race-free; upgrade (guarded UPDATEs) before threaded=True,
     # gunicorn/uvicorn workers > 1, or a scheduler thread.
-    create_app().run(port=int(os.environ.get("PORT", "5000")), threaded=False)
+    create_app().run(port=int(os.environ.get("PORT", "5000")), threaded=False, load_dotenv=False)
