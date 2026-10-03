@@ -16,6 +16,7 @@ from twilio.request_validator import RequestValidator
 import classify
 import core
 import db
+import metrics
 import scheduler
 import seed
 import templates
@@ -185,7 +186,7 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
         elif r.kind == "chw_lost":
             db.update_case(conn, cid, status="lost", escalation="none", awaiting=None)
         elif r.kind == "clinic_seen":
-            db.update_case(conn, cid, status="completed", completed_by="clinic", awaiting=None)
+            db.complete_case(conn, cid, "clinic", ts)
         elif r.kind == "clinic_not_seen":
             db.log_event(conn, cid, ts, "clinic", "clinic_not_seen")
             if db.last_event(conn, cid, ["patient_yes"]):  # patient YES + clinic N: conflict
@@ -322,6 +323,22 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
     @app.get("/api/state")
     def state():
         return jsonify({"unreachable": db.unreachable(conn)})
+
+    @app.get("/api/dashboard")
+    def dashboard():
+        return jsonify(metrics.dashboard(conn, now_fn(), seed.FACILITIES))
+
+    dashboard_origin = os.environ.get("DASHBOARD_ORIGIN", "*")
+
+    @app.after_request
+    def cors_for_read_api(resp):
+        # The hosted dashboard (Lovable) reads /api/* from another origin. GET only;
+        # nothing under /api writes. Set DASHBOARD_ORIGIN to the Lovable URL to lock it down.
+        if request.path.startswith("/api/"):
+            resp.headers["Access-Control-Allow-Origin"] = dashboard_origin
+            resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type, ngrok-skip-browser-warning"
+        return resp
 
     if sim_mode:
         # /sim routes exist only in SIM_MODE; production never exposes an

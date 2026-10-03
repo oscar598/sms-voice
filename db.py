@@ -72,6 +72,12 @@ def update_case(conn, case_id, **fields):
     conn.execute(f"UPDATE cases SET {sets} WHERE id = ?", (*fields.values(), case_id))
 
 
+def complete_case(conn, case_id, by, ts):
+    """The one way a case completes; the event timestamps time-to-completion."""
+    update_case(conn, case_id, status="completed", completed_by=by, awaiting=None)
+    log_event(conn, case_id, ts, "system", "completed", by=by)
+
+
 def open_case_for_phone(conn, phone):
     """Most recent case for this patient phone that is not finished.
 

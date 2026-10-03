@@ -67,7 +67,7 @@ def tick(conn, send, now, data):
                 # YES + clinic N is escalated when the second reply arrives (app.py),
                 # so an escalation-free case here never has both.
                 if patient_yes:
-                    db.update_case(conn, cid, status="completed", completed_by="patient", awaiting=None)
+                    db.complete_case(conn, cid, "patient", now.isoformat())
                     done.append((cid, "completed_by_patient"))
                 elif not patient_yes and not clinic_no and not db.last_event(conn, cid, ["patient_no"]):
                     _escalate(conn, send, case, now, "followup_unanswered", data)
