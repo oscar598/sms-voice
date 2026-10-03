@@ -1,3 +1,4 @@
 flask>=3.1
 twilio>=9.11
+anthropic>=0.125
 pytest>=8.4
