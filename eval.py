@@ -59,7 +59,14 @@ def load(name):
     if not path.exists():
         sys.exit(f"{path} not found. The held-out set is written by a teammate who does not tune "
                  f"the prompt (D11); see eval/heldout.TEMPLATE.jsonl for the format.")
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows = []
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            sys.exit(f"{path.name} line {n} is not valid JSON ({e.msg}): {line[:80]}")
     bad = [r for r in rows if r["label"] not in core.LABELS]
     if bad:
         sys.exit(f"unknown labels in {path.name}: {sorted({r['label'] for r in bad})}")
