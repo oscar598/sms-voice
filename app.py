@@ -433,6 +433,26 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
                 "Content-Type, ngrok-skip-browser-warning" + (", Authorization" if writes else ""))
         return resp
 
+    if sim_mode and os.environ.get("SEED_DEMO") == "1" and not conn.execute("SELECT 1 FROM cases LIMIT 1").fetchone():
+        seed.seed_history(conn, now_fn())  # first start on a fresh host disk
+
+    sim_password = os.environ.get("SIM_PASSWORD", "")
+    if sim_mode and not sim_password and os.environ.get("REQUIRE_SIM_PASSWORD") == "1":
+        # Hosted deploys set REQUIRE_SIM_PASSWORD: never serve an open /sim on the internet.
+        raise RuntimeError("SIM_PASSWORD is required on this host")
+
+    @app.before_request
+    def protect_sim():
+        # On a public host /sim would let anyone post as a patient, CHW or clinic.
+        # With SIM_PASSWORD set, the browser asks once (HTTP Basic, any username).
+        if not (sim_mode and sim_password and request.path.startswith("/sim")):
+            return None
+        auth = request.authorization
+        given = (auth.password or "") if auth else ""
+        if hmac.compare_digest(given.encode(), sim_password.encode()):
+            return None
+        return Response("Password required", 401, {"WWW-Authenticate": 'Basic realm="Referral sim"'})
+
     if sim_mode:
         # /sim routes exist only in SIM_MODE; production never exposes an
         # unsigned way into the router (D2, D4).

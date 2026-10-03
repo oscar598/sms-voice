@@ -190,3 +190,43 @@ def test_staff_free_text_gets_the_commands(phone, expected):
     client.post("/sim/referral")
     assert sim(client, phone, "hellO?") == "unparsed"
     assert outbox(client, phone)[-1].startswith(expected)
+
+
+# ------------------------------------------------------------ hosting (Render)
+
+def basic(pw):
+    import base64
+    return {"Authorization": "Basic " + base64.b64encode(f"demo:{pw}".encode()).decode()}
+
+
+@pytest.mark.parametrize("headers,status", [({}, 401), (basic("wrong"), 401), (basic("pw123"), 200)],
+                         ids=["no password", "wrong password", "right password"])
+def test_sim_password_gate(monkeypatch, headers, status):
+    monkeypatch.setenv("SIM_PASSWORD", "pw123")
+    client, _ = make()
+    assert client.get("/sim", headers=headers).status_code == status
+    r = client.post("/sim/send", json={"from": PATIENT, "body": "x"}, headers=headers)
+    assert r.status_code == (status if status == 401 else 200)
+
+
+def test_sim_password_does_not_touch_api_or_webhook(monkeypatch):
+    monkeypatch.setenv("SIM_PASSWORD", "pw123")
+    client, _ = make()
+    assert client.get("/api/dashboard").status_code == 200
+    assert client.post("/sms", data={}).status_code == 403  # still Twilio-signature gated
+
+
+def test_seed_demo_on_empty_disk_only(monkeypatch):
+    monkeypatch.setenv("SEED_DEMO", "1")
+    conn = db.connect()
+    create_app(auth_token=TOKEN, conn=conn, sim_mode=True, now_fn=lambda: NOW)
+    assert conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 40
+    create_app(auth_token=TOKEN, conn=conn, sim_mode=True, now_fn=lambda: NOW)  # restart: no reseed
+    assert conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 40
+
+
+def test_hosted_deploy_refuses_open_sim(monkeypatch):
+    monkeypatch.setenv("REQUIRE_SIM_PASSWORD", "1")
+    monkeypatch.delenv("SIM_PASSWORD", raising=False)
+    with pytest.raises(RuntimeError, match="SIM_PASSWORD"):
+        create_app(auth_token=TOKEN, conn=db.connect(), sim_mode=True)

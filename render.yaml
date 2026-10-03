@@ -1,0 +1,41 @@
+# Render Blueprint: one web service, one persistent disk.
+# One worker, one thread on purpose: case transitions are not guarded against
+# concurrent writers (D3, gstack-shortcut dec-6e0a360e). Do not scale this service
+# beyond 1 instance or raise workers/threads without adding guarded UPDATEs first.
+services:
+  - type: web
+    name: sms-voice-referral
+    runtime: python
+    plan: starter            # persistent disks need a paid instance
+    numInstances: 1
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 1 --timeout 60 --bind 0.0.0.0:$PORT "app:create_app()"
+    healthCheckPath: /api/facilities
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SIM_MODE
+        value: "1"
+      - key: SEED_DEMO
+        value: "1"           # load the 40 demo cases on first start (empty disk)
+      - key: DB_PATH
+        value: /var/data/sim.db
+      - key: CLASSIFY_TIMEOUT
+        value: "6"
+      - key: REQUIRE_SIM_PASSWORD
+        value: "1"           # refuse to start with an open /sim
+      # Secrets: entered in the Render dashboard, never committed.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false          # any value while SIM_MODE=1
+      - key: REFERRAL_TOKEN
+        sync: false
+      - key: SIM_PASSWORD
+        sync: false
+      - key: DASHBOARD_ORIGIN
+        sync: false
