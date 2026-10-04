@@ -1,0 +1,66 @@
+{
+  "_about": [
+    "The one list of clinics, read by clinics.py.",
+    "programs: 'referral' = the referral agent (app.py, simulator, dashboard);",
+    "          'followup' = the missed-appointment bot (server.py). A clinic can be in both.",
+    "hours: opening hours per weekday (mon..sun); a missing day means closed.",
+    "services 'emergency': the referral agent sends clinical cases to that clinic.",
+    "The 'Demo' clinics and their phone numbers are fictional."
+  ],
+  "clinics": [
+    {
+      "id": "FAC-A", "programs": ["referral"],
+      "name": "Demo Mto Health Centre", "area": "Kayole",
+      "address": "Off Spine Rd, near Stage 2, Kayole", "phone": "+254700000101",
+      "services": ["antenatal", "hiv", "lab"],
+      "hours": {"mon": "08:00-17:00", "tue": "08:00-17:00", "wed": "08:00-17:00", "thu": "08:00-17:00",
+                "fri": "08:00-17:00", "sat": "08:00-12:00"},
+      "hours_text": "Mon-Fri 8-5, Sat 8-12",
+      "required_docs": ["referral letter", "national id", "clinic book"],
+      "cost_note": "Consultation free; lab KES 200.",
+      "transport_note": "Matatu 34 from CBD to Stage 2"
+    },
+    {
+      "id": "FAC-B", "programs": ["referral"],
+      "name": "Demo Baraka Clinic", "area": "Embakasi",
+      "address": "Embakasi Rd, Embakasi", "phone": "+254700000102",
+      "services": ["outpatient", "tb", "lab"],
+      "hours": {"mon": "08:00-16:00", "tue": "08:00-16:00", "wed": "08:00-16:00", "thu": "08:00-16:00",
+                "fri": "08:00-16:00"},
+      "hours_text": "Mon-Fri 8-4",
+      "required_docs": ["referral letter", "national id"],
+      "cost_note": "",
+      "transport_note": "Matatu 33 from CBD"
+    },
+    {
+      "id": "FAC-C", "programs": ["referral"],
+      "name": "Demo Upendo Eye Unit", "area": "Westlands",
+      "address": "Westlands Rd, Westlands", "phone": "+254700000103",
+      "services": ["eye"],
+      "hours": {"tue": "09:00-15:00", "thu": "09:00-15:00"},
+      "hours_text": "Tue & Thu 9-3",
+      "required_docs": ["referral letter", "national id", "previous prescription"],
+      "cost_note": "Screening free.",
+      "transport_note": "Matatu 23 from CBD"
+    },
+    {
+      "id": "FAC-D", "programs": ["referral"],
+      "name": "Demo Faraja County Hospital", "area": "Kibera",
+      "address": "Kibera Dr, Kibera", "phone": "+254700000104",
+      "services": ["specialist", "maternity", "emergency", "lab"],
+      "hours": {"mon": "00:00-24:00", "tue": "00:00-24:00", "wed": "00:00-24:00", "thu": "00:00-24:00",
+                "fri": "00:00-24:00", "sat": "00:00-24:00", "sun": "00:00-24:00"},
+      "hours_text": "Outpatient Mon-Sat 8-5; emergency 24 h",
+      "required_docs": ["referral letter", "national id", "insurance card", "lab results"],
+      "cost_note": "SHA accepted.",
+      "transport_note": "Matatu 8 from CBD"
+    },
+    {
+      "id": "NY-SINAI", "programs": ["followup"],
+      "name": "Icahn School of Medicine at Mount Sinai", "area": "East Harlem",
+      "address": "1 Gustave L. Levy Place, New York, NY 10029", "phone": "1234567890",
+      "services": [], "hours": {}, "hours_text": "",
+      "required_docs": [], "cost_note": "", "transport_note": ""
+    }
+  ]
+}

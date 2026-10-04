@@ -34,9 +34,8 @@ Config (environment variables, or .env in this folder):
     CLASSIFY_MODEL default claude-opus-5-5        (shared with classify.py)
     LLM_TIMEOUT   default 30 seconds per Claude call
     GOOGLE_MAPS_API_KEY                           Routes API key (transport directions)
-    CLINIC_NAME / CLINIC_ADDRESS                  destination for directions; a
-                                                  `clinic_address` CSV column overrides it
-    CLINIC_PHONE                                  number in the transportation-assistance line
+    DEFAULT_CLINIC_ID                             clinic (in clinics.json) for patients whose
+                                                  `clinic_id` column is empty or missing
     PATIENTS_CSV  default patients.csv
     CONVOS_JSON   default conversations.json
 """
@@ -64,6 +63,7 @@ if __name__ == "__main__":
 
 import classify  # noqa: E402
 import core  # noqa: E402
+import clinics  # noqa: E402
 import directions  # noqa: E402
 import templates  # noqa: E402
 
@@ -71,9 +71,7 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://192.168.43.1:8080").rstrip("
 GATEWAY_USER = os.environ.get("GATEWAY_USER", "")
 GATEWAY_PASS = os.environ.get("GATEWAY_PASS", "")
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "30"))
-CLINIC_NAME = os.environ.get("CLINIC_NAME", "The clinic")
-CLINIC_ADDRESS = os.environ.get("CLINIC_ADDRESS", "")
-CLINIC_PHONE = os.environ.get("CLINIC_PHONE", "")
+DEFAULT_CLINIC_ID = os.environ.get("DEFAULT_CLINIC_ID", "")
 PATIENTS_CSV = os.environ.get("PATIENTS_CSV", "patients.csv")
 CONVOS_JSON = os.environ.get("CONVOS_JSON", "conversations.json")
 
@@ -270,17 +268,24 @@ def ask_claude(history: list[dict]) -> dict | None:
 HANDOFF_REPLY = "Thank you for your message. A clinic staff member will contact you soon."
 
 
+def clinic_for(patient: dict) -> dict | None:
+    """The patient's clinic from clinics.json: their `clinic_id` column, else DEFAULT_CLINIC_ID."""
+    cid = (patient.get("clinic_id") or DEFAULT_CLINIC_ID).strip()
+    clinic = clinics.BY_ID.get(cid)
+    if clinic is None:
+        log(f"  {patient.get('patient_id')}: clinic {cid or '(none)'} is not in clinics.json "
+            "(set the clinic_id column or DEFAULT_CLINIC_ID)")
+    return clinic
+
+
 def transport_directions(patient: dict) -> str | None:
     """Clinic address, car / public transport / bicycle routes, and the assistance line."""
-    help_line = templates.TRANSPORT_HELP.format(phone=CLINIC_PHONE) if CLINIC_PHONE else ""
-    if not help_line:
-        log("  transport help line skipped: CLINIC_PHONE is not set")
-    clinic_address = (patient.get("clinic_address") or CLINIC_ADDRESS).strip()
-    if not clinic_address:
-        log("  directions skipped: CLINIC_ADDRESS is not set")
-        return help_line or None
-    return directions.transport_sms(patient.get("address", "").strip(), CLINIC_NAME,
-                                    clinic_address, log=log, footer=help_line)
+    clinic = clinic_for(patient)
+    if clinic is None:
+        return None
+    help_line = templates.TRANSPORT_HELP.format(phone=clinic["phone"]) if clinic["phone"] else ""
+    return directions.transport_sms(patient.get("address", "").strip(), clinic["name"],
+                                    clinic["address"], log=log, footer=help_line)
 
 
 def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
@@ -495,7 +500,7 @@ def cmd_directions(pid: str) -> None:
     """Print the transport directions SMS for one patient, without sending it."""
     p = find_patient(pid)
     print(f"From: {p.get('address') or '(no address)'}")
-    print(transport_directions(p) or "(no directions: set CLINIC_ADDRESS)")
+    print(transport_directions(p) or "(no directions: the patient has no clinic in clinics.json)")
 
 
 def cmd_reset() -> None:

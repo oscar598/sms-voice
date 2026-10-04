@@ -37,7 +37,9 @@ sms-voice/
 ├── scheduler.py            # Reminders, follow-ups, completion timers (runs on each request)
 ├── db.py                   # SQLite schema and queries
 ├── metrics.py              # Dashboard numbers and the clinic reliability radar
-├── seed.py                 # Synthetic Nairobi clinics, CHW and 40 demo cases
+├── clinics.json            # The one list of clinics, used by both programs (edit this)
+├── clinics.py              # Loads clinics.json
+├── seed.py                 # Referral-agent demo data: its clinics, CHW, demo case, 40 history cases
 ├── server.py               # Missed-appointment follow-up over an Android SMS gateway
 ├── directions.py           # Google Maps car / transit / bicycle directions for transport replies
 ├── envfile.py              # Loads .env for the command-line entry points
