@@ -11,7 +11,7 @@ Flow:
   2. Each reply arrives at /sms. Claude (classify.chat_json) reads the conversation,
      classifies the reason, and drafts a short reply.
   3. Guardrails wrap the model:
-       - STOP and emergency words are handled by fixed rules, never by the LLM
+       - STOP and emergency words are handled by fixed rules, never by Claude
        - the model must return structured JSON; anything malformed or low-confidence
          is handed to a staff member instead of guessed
        - the bot never books, diagnoses, or gives medical advice; it collects
@@ -24,6 +24,7 @@ Commands:
     python server.py send                       # message all patients who missed
     python server.py send --id P99999           # message one patient (any date)
     python server.py chat --id P99999           # test the bot in the terminal, no SMS
+    python server.py directions --id P99999     # print the transport directions SMS, no SMS
     python server.py reset                      # clear conversations between demo runs
 
 Config (environment variables, or .env in this folder):
@@ -32,6 +33,10 @@ Config (environment variables, or .env in this folder):
     ANTHROPIC_API_KEY                             Claude API key
     CLASSIFY_MODEL default claude-opus-5-5        (shared with classify.py)
     LLM_TIMEOUT   default 30 seconds per Claude call
+    GOOGLE_MAPS_API_KEY                           Routes API key (transport directions)
+    CLINIC_NAME / CLINIC_ADDRESS                  destination for directions; a
+                                                  `clinic_address` CSV column overrides it
+    CLINIC_PHONE                                  number in the transportation-assistance line
     PATIENTS_CSV  default patients.csv
     CONVOS_JSON   default conversations.json
 """
@@ -54,15 +59,21 @@ import envfile
 if __name__ == "__main__":
     # Same .env loader as app.py / eval.py, and only when run as a script, so
     # importing this module (e.g. from tests) never pulls in a real API key.
-    # Runs before `import classify`, which reads CLASSIFY_MODEL at import time.
+    # Must run before the settings below are read.
     envfile.load()
 
-import classify  # noqa: E402 - must come after envfile.load()
+import classify  # noqa: E402
+import core  # noqa: E402
+import directions  # noqa: E402
+import templates  # noqa: E402
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://192.168.43.1:8080").rstrip("/")
 GATEWAY_USER = os.environ.get("GATEWAY_USER", "")
 GATEWAY_PASS = os.environ.get("GATEWAY_PASS", "")
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "30"))
+CLINIC_NAME = os.environ.get("CLINIC_NAME", "The clinic")
+CLINIC_ADDRESS = os.environ.get("CLINIC_ADDRESS", "")
+CLINIC_PHONE = os.environ.get("CLINIC_PHONE", "")
 PATIENTS_CSV = os.environ.get("PATIENTS_CSV", "patients.csv")
 CONVOS_JSON = os.environ.get("CONVOS_JSON", "conversations.json")
 
@@ -73,15 +84,10 @@ MIN_CONFIDENCE = 0.6
 EXTRA_COLUMNS = ["miss_reason", "wants_reschedule", "needs_followup", "opted_out", "last_reply"]
 REASONS = ["transport", "cost", "illness", "forgot", "work_or_childcare",
            "felt_better", "clinic_issue", "other", "unclear"]
-STOP_WORDS = {"stop", "unsubscribe", "quit"}
-# Fixed, rule-based. Extend for the local language; English-only is a known limitation.
-EMERGENCY_PATTERNS = [
-    r"\bcan'?t breathe\b", r"\bnot breathing\b", r"\bchest pain\b", r"\bunconscious\b",
-    r"\bheavy bleeding\b", r"\bbleeding a lot\b", r"\bseizure\b", r"\bsuicid", r"\bkill myself\b",
-    r"\bemergency\b", r"\bdying\b",
-]
-EMERGENCY_REPLY = ("This sounds urgent. Please go to the nearest health facility now "
-                   "or call emergency services. A clinic staff member has been alerted.")
+# STOP words and emergency words are shared with the referral agent: core.STOP_WORDS
+# and core.EMERGENCY_TERMS (extend those for the local language).
+EMERGENCY_REPLY = ("This sounds urgent. In an urgent emergency, call 911 now or go to the "
+                   "nearest health facility. A clinic staff member has been alerted.")
 
 SYSTEM_PROMPT = f"""You are a polite follow-up assistant for a small rural health clinic.
 You talk with patients by SMS after they missed an appointment.
@@ -99,6 +105,8 @@ Rules you must follow:
 - NEVER confirm or book a specific appointment time. Say clinic staff will confirm it.
 - NEVER mention the reason for their visit or any health condition.
 - Do not invent facts about the clinic (hours, prices, services, transport).
+- If transport is the problem, do not give directions or a phone number yourself: the
+  clinic's system texts them the clinic address, routes and a help number separately.
 - If you are unsure what they mean, ask one short clarifying question.
 
 Fill in every field of the JSON response:
@@ -232,12 +240,12 @@ def opening_message(p: dict) -> str:
 
 # ---------------- the AI step ----------------
 
-def ask_llm(history: list[dict]) -> dict | None:
+def ask_claude(history: list[dict]) -> dict | None:
     """Return Claude's parsed JSON decision, or None if anything goes wrong."""
     try:
         out = classify.chat_json(SYSTEM_PROMPT, history, REPLY_SCHEMA, timeout=LLM_TIMEOUT)
     except Exception as e:  # noqa: BLE001 - any failure falls back to a human
-        log(f"  LLM error: {e}")
+        log(f"  Claude error: {e}")
         return None
 
     # Validate: malformed output is treated as "not sure", never sent as-is.
@@ -262,6 +270,19 @@ def ask_llm(history: list[dict]) -> dict | None:
 HANDOFF_REPLY = "Thank you for your message. A clinic staff member will contact you soon."
 
 
+def transport_directions(patient: dict) -> str | None:
+    """Clinic address, car / public transport / bicycle routes, and the assistance line."""
+    help_line = templates.TRANSPORT_HELP.format(phone=CLINIC_PHONE) if CLINIC_PHONE else ""
+    if not help_line:
+        log("  transport help line skipped: CLINIC_PHONE is not set")
+    clinic_address = (patient.get("clinic_address") or CLINIC_ADDRESS).strip()
+    if not clinic_address:
+        log("  directions skipped: CLINIC_ADDRESS is not set")
+        return help_line or None
+    return directions.transport_sms(patient.get("address", "").strip(), CLINIC_NAME,
+                                    clinic_address, log=log, footer=help_line)
+
+
 def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
     """Process one incoming patient message; returns the reply sent (or None)."""
     with csv_lock:
@@ -275,21 +296,21 @@ def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
 
         convo = convos.setdefault(k, {"patient_id": patient["patient_id"],
                                       "status": "open", "messages": []})
+        extra = None  # a second SMS after the reply (transport directions)
         convo["messages"].append({"role": "user", "content": text,
                                   "time": datetime.now().isoformat(timespec="seconds")})
         patient["last_reply"] = text
         pid = patient["patient_id"]
-        lowered = text.lower()
 
         # --- Rule 1: opt-out, never routed to the model ---
-        if lowered.strip().strip(".!") in STOP_WORDS:
+        if core.is_stop(text):
             patient["opted_out"] = "True"
             convo["status"] = "closed"
             reply = "You will not receive more messages from the clinic."
             log(f"  {pid} opted out")
 
-        # --- Rule 2: emergencies get a fixed message, never an LLM one ---
-        elif any(re.search(p, lowered) for p in EMERGENCY_PATTERNS):
+        # --- Rule 2: emergencies get a fixed message, never a Claude one ---
+        elif core.emergency_hit(text):
             patient["needs_followup"] = "True"
             convo["status"] = "closed"
             reply = EMERGENCY_REPLY
@@ -305,13 +326,13 @@ def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
 
         # --- The AI step ---
         else:
-            log(f"  asking {classify.MODEL}...")
-            d = ask_llm(convo["messages"])
+            log(f"  asking Claude ({classify.model()})...")
+            d = ask_claude(convo["messages"])
             if d is None or d["confidence"] < MIN_CONFIDENCE:
                 patient["needs_followup"] = "True"
                 convo["status"] = "closed"
                 reply = HANDOFF_REPLY
-                why = "LLM failed" if d is None else f"low confidence {d['confidence']:.2f}"
+                why = "Claude failed" if d is None else f"low confidence {d['confidence']:.2f}"
                 log(f"  {pid} {why} -> not guessing, staff will follow up")
             else:
                 reply = d["reply"]
@@ -323,17 +344,24 @@ def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
                     patient["needs_followup"] = "True"
                 if d["done"]:
                     convo["status"] = "closed"
+                if d["reason"] == "transport" and not convo.get("directions_sent"):
+                    # Facts come from Google Maps via code, never from Claude; once per conversation.
+                    extra = transport_directions(patient)
+                    convo["directions_sent"] = bool(extra)
                 log(f"  {pid} reason={d['reason']} reschedule={d['wants_reschedule']} "
                     f"time={d['preferred_time']!r} staff={d['needs_staff']} "
                     f"done={d['done']} conf={d['confidence']:.2f}")
 
-        convo["messages"].append({"role": "assistant", "content": reply,
-                                  "time": datetime.now().isoformat(timespec="seconds")})
+        replies = [reply] + ([extra] if extra else [])
+        for r in replies:
+            convo["messages"].append({"role": "assistant", "content": r,
+                                      "time": datetime.now().isoformat(timespec="seconds")})
         save_patients(rows, fields)
         save_convos(convos)
 
-    gateway_send(patient["phone"], reply, dry_run=dry_run)
-    return reply
+    for r in replies:
+        gateway_send(patient["phone"], r, dry_run=dry_run)
+    return "\n".join(replies)
 
 
 # ---------------- web endpoints ----------------
@@ -391,7 +419,7 @@ th{{background:#f4f4f4;text-align:left}}
 pre{{background:#111;color:#0f0;padding:12px;font-size:12px;max-height:260px;overflow:auto}}
 </style></head><body>
 <h2>Clinic Missed-Appointment Follow-up</h2>
-<p>Model: {html.escape(classify.MODEL)} (Claude) · refreshes every 3s</p>
+<p>Model: Claude ({html.escape(classify.model())}) · refreshes every 3s</p>
 <h3>Conversations</h3><div class="chats">{chats or "(none yet)"}</div>
 <h3>Patients</h3><table><tr>{head}</tr>{body}</table>
 <h3>Log</h3><pre>{logs or "(no events yet)"}</pre></body></html>"""
@@ -434,12 +462,17 @@ def cmd_send(only_id: str | None) -> None:
               "Use --id to message a specific patient.")
 
 
-def cmd_chat(pid: str) -> None:
-    """Try the bot in the terminal without sending any SMS."""
+def find_patient(pid: str) -> dict:
     rows, _ = load_patients()
     p = next((r for r in rows if r["patient_id"] == pid), None)
     if p is None:
         sys.exit(f"No patient {pid}")
+    return p
+
+
+def cmd_chat(pid: str) -> None:
+    """Try the bot in the terminal without sending any SMS."""
+    p = find_patient(pid)
     convos = load_convos()
     start_conversation(p, convos, dry_run=True)
     save_convos(convos)
@@ -456,6 +489,13 @@ def cmd_chat(pid: str) -> None:
         if load_convos()[key_for(p["phone"])]["status"] == "closed":
             print("(conversation closed)")
             break
+
+
+def cmd_directions(pid: str) -> None:
+    """Print the transport directions SMS for one patient, without sending it."""
+    p = find_patient(pid)
+    print(f"From: {p.get('address') or '(no address)'}")
+    print(transport_directions(p) or "(no directions: set CLINIC_ADDRESS)")
 
 
 def cmd_reset() -> None:
@@ -483,6 +523,7 @@ def main() -> None:
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=5000)
     sd = sub.add_parser("send"); sd.add_argument("--id")
     ch = sub.add_parser("chat"); ch.add_argument("--id", required=True)
+    dr = sub.add_parser("directions"); dr.add_argument("--id", required=True)
     rg = sub.add_parser("register"); rg.add_argument("url")
     sub.add_parser("reset")
     args = ap.parse_args()
@@ -490,12 +531,14 @@ def main() -> None:
     if not os.path.exists(PATIENTS_CSV):
         sys.exit(f"{PATIENTS_CSV} not found. Run generate_patients.py first.")
     if args.cmd == "serve":
-        log(f"Server starting; dashboard at http://localhost:{args.port}/  model={classify.MODEL}")
+        log(f"Server starting; dashboard at http://localhost:{args.port}/  model=Claude ({classify.model()})")
         app.run(host="0.0.0.0", port=args.port, threaded=True)
     elif args.cmd == "send":
         cmd_send(args.id)
     elif args.cmd == "chat":
         cmd_chat(args.id)
+    elif args.cmd == "directions":
+        cmd_directions(args.id)
     elif args.cmd == "register":
         cmd_register(args.url)
     elif args.cmd == "reset":

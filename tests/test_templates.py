@@ -34,7 +34,7 @@ def patient_slots():
                 "transport_note": f["transport_note"], "cost_note": f["cost_note"],
                 "required_docs": ", ".join(f["required_docs"]),
                 "alt_name": alt["name"], "alt_hours": alt["hours_text"], "alt_address": alt["address"],
-                "emergency_name": seed.EMERGENCY["name"], "emergency_number": seed.EMERGENCY["number"],
+                "emergency_name": seed.EMERGENCY["name"],
             }
 
 

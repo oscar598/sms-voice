@@ -25,6 +25,11 @@ import seed
 import templates
 
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+WEB_DIR = Path(__file__).parent / "web"
+
+
+def _page(name):
+    return (WEB_DIR / name).read_text(encoding="utf-8")
 
 
 class SendError(Exception):
@@ -81,9 +86,10 @@ def send_sms(conn, sender, case_id, to, body, now, advance_to=None):
 QUOTE_MAX = 60
 
 
-def _quote(text):
+def _quote(text, limit=QUOTE_MAX):
+    """Patient words on one line, cut to `limit` chars (60 in a baton SMS, more in live chat)."""
     text = " ".join((text or "").split())
-    return text if len(text) <= QUOTE_MAX else text[: QUOTE_MAX - 3] + "..."
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def start_referral(conn, send, case, now, data=seed):
@@ -240,7 +246,7 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
         chw_phone = next(c["phone"] for c in data.CHWS if c["id"] == case["claimed_by_chw"])
         db.log_event(conn, cid, ts, "agent", "relayed", to_role="chw")
         send_sms(conn, send, cid, chw_phone, templates.render(
-            templates.CHW, "from_patient", case_id=cid, quote=_quote_relay(body)), now)
+            templates.CHW, "from_patient", case_id=cid, quote=_quote(body, templates.RELAY_MAX)), now)
     elif r.kind in core.REASKS and not may_reask:
         cls = core.Classification("unknown", reason="no_answer")
         plan = core.decide(cls, case, facility, data.FACILITIES, today, data.EMERGENCY)
@@ -279,11 +285,6 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
     return r.kind
 
 
-def _quote_relay(text):
-    text = " ".join((text or "").split())
-    return text if len(text) <= templates.RELAY_MAX else text[: templates.RELAY_MAX - 3] + "..."
-
-
 _CASE_PREFIX = re.compile(r"^\s*(?:r-?)?0*(\d{1,6})\s*[:,-]?\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
 
@@ -301,7 +302,7 @@ def _relay_from_chw(conn, send, chw, body, now):
         return "unparsed"
     cid = case["id"]
     db.log_event(conn, cid, now.isoformat(), "chw", "inbound", body=body, route="relay")
-    send_sms(conn, send, cid, case["patient_phone"], templates.CHW_RELAY + _quote_relay(text), now)
+    send_sms(conn, send, cid, case["patient_phone"], templates.CHW_RELAY + _quote(text, templates.RELAY_MAX), now)
     conn.commit()
     return "relay"
 
@@ -471,14 +472,14 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
 
     @app.get("/")
     def home():
-        page = (Path(__file__).parent / "home.html").read_text()
+        page = _page("home.html")
         for k, v in links.items():
             page = page.replace(k, html.escape(v, quote=True))
         return Response(page, mimetype="text/html")
 
     @app.get("/referrals/new")
     def referral_form():
-        return Response((Path(__file__).parent / "referral.html").read_text(), mimetype="text/html")
+        return Response(_page("referral.html"), mimetype="text/html")
 
     @app.after_request
     def cors_for_api(resp):
@@ -526,7 +527,7 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
         # unsigned way into the router (D2, D4).
         @app.get("/sim")
         def sim_page():
-            return Response((Path(__file__).parent / "sim.html").read_text(), mimetype="text/html")
+            return Response(_page("sim.html"), mimetype="text/html")
 
         @app.get("/sim/config")
         def sim_config():

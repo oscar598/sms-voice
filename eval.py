@@ -25,6 +25,7 @@ import classify
 import core
 import envfile
 import seed
+import templates
 
 EVAL_DIR = Path(__file__).parent / "eval"
 TODAY = date(2026, 10, 5)  # fixed so gold return dates stay correct
@@ -84,28 +85,105 @@ def action(cls):
     return (plan.patient[0], plan.escalate)
 
 
+# ------------------------------------------------------------- one message, offline
+
+
+@dataclass
+class Simulation:
+    """Everything that happens to one patient SMS, without a database or a phone."""
+    route: str                  # core.route() kind: classify | clinical | opt_out | ask_date | ...
+    source: str                 # model | model_error | keyword | rule
+    label: str = None           # final label after guards (None for rule replies)
+    reason: str = None          # why: ok | low_confidence | multi_barrier | keyword | rule text ...
+    raw: dict = None            # Claude's JSON, when Claude was called
+    error: str = None           # why Claude failed, when it did
+    template: str = None        # patient template key
+    patient_sms: str = None
+    clinic_sms: str = None
+    escalate: str = None        # None | clinical | non_clinical
+    latency_s: float = None
+    usage: dict = field(default_factory=dict)
+
+
+RULE_REPLIES = {  # route kinds answered by code without Claude, and what they mean
+    "opt_out": "STOP: opted out, nothing more is sent",
+    "opt_in": "START: messages resume",
+    "holding": "case is waiting for a person: fixed holding reply",
+    "yes": "exact YES to a yes/no question",
+    "no": "exact NO to a yes/no question",
+    "ask_barrier": "bare reply: asks what is stopping them",
+    "ask_date": "bare reply: asks which day they will go",
+    "ask_again": "bare reply: asks again",
+    "ack_visit": "bare reply: confirms the visit date",
+}
+
+
+def simulate(text, case, facility, today, classify_fn, facilities=None, emergency=None,
+             open_prompt="free_text", use_rules=True, always_call_model=False,
+             may_reask=True, directions_fn=None):
+    """Run one patient SMS through the live decision path and return what happens.
+
+    Same order as app.handle_inbound: clinical keywords, then the exact-token
+    rules (STOP, bare yes/ok...), then Claude, guards and the rules table.
+    classify_fn(text, today, meta) is classify.classify or a test stand-in.
+    use_rules=False sends everything except keyword hits to Claude (eval.py
+    measures the model). always_call_model=True also asks Claude on keyword hits,
+    to show its own label. directions_fn() returns a directions SMS that replaces
+    the transport template (None keeps the template).
+    """
+    facilities = facilities or seed.FACILITIES
+    emergency = emergency or seed.EMERGENCY
+    r = core.route(text, "patient", {"escalation": "none", **case}, open_prompt)
+    kind = r.kind if use_rules or r.kind == "clinical" else "classify"
+
+    if kind not in ("classify", "clinical"):
+        s = Simulation(kind, "rule", reason=RULE_REPLIES.get(kind, kind))
+        if kind in core.REASKS or kind == "holding":
+            s.template = kind
+            s.patient_sms = templates.render(templates.PATIENT, kind, name=facility["name"])
+        elif kind == "ack_visit":
+            s.template = "plan_ack"
+            s.patient_sms = templates.render(templates.PATIENT, "plan_ack", name=facility["name"],
+                                             date=case.get("visit_date"))
+        elif kind == "no":
+            s.template, s.patient_sms = "what_happened", templates.PATIENT["what_happened"]
+        return s
+
+    s = Simulation(kind, "keyword" if kind == "clinical" else "model")
+    if kind == "classify" or always_call_model:
+        meta, start = {}, time.monotonic()
+        try:
+            s.raw = classify_fn(text, today, meta)
+        except classify.ClassifierUnavailable as e:
+            s.error = str(e)
+        s.latency_s, s.usage = round(time.monotonic() - start, 3), meta.get("usage", {})
+    if kind == "clinical":
+        cls = core.Classification("clinical_symptom", urgent=True, reason="keyword")
+    else:
+        areas = sorted({f["area"] for f in facilities})
+        cls = core.apply_guards(s.raw, today, areas, facility, error=s.error is not None)
+        if s.error:
+            s.source = "model_error"
+    plan = core.decide(cls, case, facility, facilities, today, emergency, may_reask=may_reask)
+    s.label, s.reason = cls.label, (s.error if kind == "classify" and s.error else cls.reason)
+    s.template, s.escalate = plan.patient[0], plan.escalate
+    s.patient_sms = core.render_plan(plan)
+    if s.template == "transport" and directions_fn:
+        s.patient_sms = directions_fn() or s.patient_sms
+    if plan.clinic:
+        _, key, slots = plan.clinic
+        s.clinic_sms = templates.render(templates.CLINIC, key, **slots)
+    return s
+
+
 def run_one(row, classify_fn):
     facility = seed.FACILITY_BY_ID[CASE["facility_id"]]
     gold_cls = core.Classification(row["label"], row.get("fields", {}), urgent=row["label"] == "clinical_symptom")
-    gold_action = action(gold_cls)
-
-    route = core.route(row["text"], "patient", {"escalation": "none"}, "free_text")
-    if route.kind == "clinical":
-        cls = core.Classification("clinical_symptom", urgent=True, reason="keyword")
-        return Result(row["text"], row["label"], cls.label, "keyword", gold_action, action(cls))
-
-    meta, start = {}, time.monotonic()
-    try:
-        raw, error = classify_fn(row["text"], TODAY, meta), False
-    except classify.ClassifierUnavailable as e:
-        raw, error = None, True
-        meta["error"] = str(e)
-    latency = time.monotonic() - start
-    cls = core.apply_guards(raw, TODAY, seed.AREAS, facility, error=error)
+    s = simulate(row["text"], CASE, facility, TODAY, classify_fn, use_rules=False, may_reask=False)
     return Result(
-        row["text"], row["label"], cls.label, "model_error" if error else "model", gold_action, action(cls),
-        raw_label=(raw or {}).get("barrier"), confidence=(raw or {}).get("confidence"),
-        reason=meta.get("error") or cls.reason, latency_s=round(latency, 3), usage=meta.get("usage", {}),
+        row["text"], row["label"], s.label, s.source, action(gold_cls), (s.template, s.escalate),
+        raw_label=(s.raw or {}).get("barrier"), confidence=(s.raw or {}).get("confidence"),
+        reason=s.reason, latency_s=s.latency_s, usage=s.usage,
     )
 
 
@@ -157,10 +235,11 @@ def print_report(name, s):
                 print(f"    [{r.gold} -> {r.pred}, conf={r.confidence}] {r.text}")
 
 
-def live_classifier():
+def classifier_fn(timeout=EVAL_TIMEOUT_S):
+    """classify.classify with a longer timeout, for offline tools (eval, CLI, scenarios)."""
     import anthropic
 
-    client = anthropic.Anthropic(timeout=EVAL_TIMEOUT_S, max_retries=0)
+    client = anthropic.Anthropic(timeout=timeout, max_retries=0)
 
     def fn(text, today, meta):
         return classify.classify(text, today, client=client, meta=meta)
@@ -175,7 +254,7 @@ def main(argv=None):
     envfile.load()  # ANTHROPIC_API_KEY etc. from .env, unless already set
 
     rows = load(args.set)[: args.limit]
-    fn = live_classifier()
+    fn = classifier_fn()
     results = []
     for i, row in enumerate(rows, 1):
         results.append(run_one(row, fn))

@@ -1,9 +1,16 @@
-"""Model call that labels a patient message. The only place the AI is used.
+"""Claude calls. The only place the AI is used.
 
-The model returns schema-constrained JSON; core.apply_guards() still validates
-every value, so nothing here is trusted on its own. Any failure (timeout,
-API error, refusal, truncated output) raises ClassifierUnavailable, which the
-caller turns into an urgent CHW handoff (D6) - never a guessed label.
+classify()  labels one patient SMS for the referral agent (app.py, eval.py).
+chat_json() runs one multi-turn conversation step for server.py.
+
+Both return schema-constrained JSON, and callers still validate every value
+(core.apply_guards() / server.ask_claude()), so nothing here is trusted on its
+own. Any failure (timeout, API error, refusal, truncated output) raises
+ClassifierUnavailable, which callers turn into a hand-off to a person - never
+a guessed answer.
+
+    python classify.py "went there yesterday the gate was locked"
+    python classify.py            # interactive: type messages, empty line to quit
 """
 
 import json
@@ -12,22 +19,25 @@ from datetime import date
 
 import anthropic
 
-MODEL = os.environ.get("CLASSIFY_MODEL", "claude-opus-5-5")
-# Live calls measured 2.5-3.5 s (2026-10-03), so the original 3 s budget timed
-# out about half the time. 6 s keeps most SMS replies near the 5 s goal.
+import core
+import seed
+
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+BARRIERS = list(core.LABELS)
+# Every document any facility asks for; Claude may only name one of these.
+DOCS = sorted({d for f in seed.FACILITIES for d in f["required_docs"]})
+
+
+def model():
+    """Read when called, so a CLASSIFY_MODEL set in .env is used even if .env loads late."""
+    return os.environ.get("CLASSIFY_MODEL", "claude-opus-5-5")
 
 
 def timeout_s():
+    # Live calls measured 2.5-3.5 s (2026-10-03), so the original 3 s budget timed
+    # out about half the time. 6 s keeps most SMS replies near the 5 s goal.
     return float(os.environ.get("CLASSIFY_TIMEOUT", "6.0"))
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-BARRIERS = [
-    "transport", "cost", "wrong_facility", "missing_documents", "scheduling",
-    "clinic_closed", "turned_away", "language", "fear_confusion",
-    "clinical_symptom", "plan_ack", "unknown",
-]
-DOCS = ["referral letter", "national id", "clinic book", "insurance card",
-        "lab results", "previous prescription"]
 
 SYSTEM = """You label one SMS from a patient who was referred to a clinic in Nairobi, Kenya. \
 Messages may be English, Swahili, Sheng, slang or misspelled. You only label; you never reply to the patient.
@@ -97,27 +107,30 @@ def _default_client():
     return _client
 
 
-def build_request(text, today):
+def _request(system, messages, schema, max_tokens):
     return dict(
-        model=MODEL,
-        max_tokens=2048,  # thinking is always on for this model; leave room for it + ~100 tokens of JSON
+        model=model(),
+        max_tokens=max_tokens,  # thinking is always on for this model; leave room for it + the JSON
         betas=[FALLBACK_BETA],
         fallbacks="default",  # a safety decline re-runs on Anthropic's recommended fallback model
-        system=SYSTEM,
-        output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
-        messages=[{"role": "user", "content": f"Today is {today.isoformat()} ({today:%A}).\nSMS: {text}"}],
+        system=system,
+        output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+        messages=messages,
     )
 
 
-def classify(text, today=None, client=None, meta=None):
-    """Return the model's label dict, or raise ClassifierUnavailable.
+def build_request(text, today):
+    return _request(SYSTEM, [{"role": "user", "content": f"Today is {today.isoformat()} ({today:%A}).\nSMS: {text}"}],
+                    SCHEMA, max_tokens=2048)
 
-    If `meta` is a dict, token usage is recorded in it (used by eval.py).
-    """
-    today = today or date.today()
+
+def _send(request, client=None, timeout=None, meta=None):
+    """Make the call and return the parsed JSON, or raise ClassifierUnavailable."""
     try:
         client = client or _default_client()
-        response = client.beta.messages.create(**build_request(text, today))
+        if timeout is not None:
+            client = client.with_options(timeout=timeout)
+        response = client.beta.messages.create(**request)
     except anthropic.AnthropicError as e:  # timeout, connection, 4xx/5xx
         raise ClassifierUnavailable(type(e).__name__) from e
     except TypeError as e:
@@ -135,124 +148,76 @@ def classify(text, today=None, client=None, meta=None):
     if text_block is None:
         raise ClassifierUnavailable("no text block")
     try:
-        out = json.loads(text_block.text)
+        return json.loads(text_block.text)
     except json.JSONDecodeError as e:
         raise ClassifierUnavailable("invalid json") from e
 
+
+def classify(text, today=None, client=None, meta=None):
+    """Return the model's label dict, or raise ClassifierUnavailable.
+
+    If `meta` is a dict, token usage is recorded in it (used by eval.py).
+    """
+    out = _send(build_request(text, today or date.today()), client=client, meta=meta)
     # Nulls mean "not stated"; core.validate_fields() expects them absent.
     out["fields"] = {k: v for k, v in (out.get("fields") or {}).items() if v is not None}
     return out
 
 
 def chat_json(system, messages, schema, timeout=None, client=None, max_tokens=4096):
-    """One multi-turn Claude call that must return JSON matching `schema`.
+    """One multi-turn Claude call that must return JSON matching `schema` (server.py).
 
     `messages` is [{"role": "user"|"assistant", "content": str}, ...] ending with
-    a user turn. Used by server.py. Same failure contract as classify(): any
-    problem raises ClassifierUnavailable, never a guessed answer.
+    a user turn.
     """
     turns = [{"role": m["role"], "content": m["content"]} for m in messages]
     if turns and turns[0]["role"] != "user":
         # The API requires a user turn first; ours often open with the clinic's SMS.
         turns.insert(0, {"role": "user", "content": "(The clinic starts the conversation.)"})
-    try:
-        client = client or _default_client()
-        if timeout is not None:
-            client = client.with_options(timeout=timeout)
-        response = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=max_tokens,  # thinking is always on for this model; leave room for it
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
-            system=system,
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
-            messages=turns,
-        )
-    except anthropic.AnthropicError as e:
-        raise ClassifierUnavailable(type(e).__name__) from e
-    except TypeError as e:
-        if "authentication" not in str(e):
-            raise
-        raise ClassifierUnavailable("no credentials") from e
-
-    if response.stop_reason != "end_turn":
-        raise ClassifierUnavailable(f"stop_reason={response.stop_reason}")
-    text_block = next((b for b in response.content if b.type == "text"), None)
-    if text_block is None:
-        raise ClassifierUnavailable("no text block")
-    try:
-        return json.loads(text_block.text)
-    except json.JSONDecodeError as e:
-        raise ClassifierUnavailable("invalid json") from e
+    return _send(_request(system, turns, schema, max_tokens), client=client, timeout=timeout)
 
 
 # ------------------------------------------------------------- command line
-# python classify.py "went there yesterday the gate was locked"
-# python classify.py            (interactive: type messages, empty line to quit)
-#
-# Sends one patient message to Claude and prints what the agent would do for
-# the demo case R-0142, through the same guards and rules as a live SMS.
-# Nothing is written to the database and no SMS is sent. Unlike the app, it
-# calls Claude even when a clinical keyword matches, to show the model's label.
-# Imports stay inside the functions so importing this module is unchanged.
-
-
-def _cli_run(text, today):
-    import time
-
-    import core
-    import seed
-    import templates
-
-    case = dict(seed.DEMO_CASE, area=seed.DEMO_CASE["patient_area"])
-    facility = seed.FACILITY_BY_ID[case["facility_id"]]
-
-    start = time.monotonic()
-    try:
-        raw, error = classify(text, today), None
-    except ClassifierUnavailable as e:
-        raw, error = None, str(e)
-    latency = time.monotonic() - start
-
-    print(f"\nMessage:   {text}")
-    if error:
-        print(f"Claude:    FAILED ({error}) after {latency:.1f}s")
-    else:
-        print(f"Claude:    {json.dumps(raw, ensure_ascii=False)}  ({latency:.1f}s)")
-
-    cls = core.apply_guards(raw, today, seed.AREAS, facility, error=error is not None)
-    if core.clinical_hit(text):
-        # The live router never reaches Claude here; the keyword decides.
-        cls = core.Classification("clinical_symptom", urgent=True, reason="keyword")
-        print("Keyword:   clinical keyword found - the live app skips Claude for this message")
-    print(f"Decision:  {cls.label}  (reason: {cls.reason})")
-
-    plan = core.decide(cls, case, facility, seed.FACILITIES, today, seed.EMERGENCY, may_reask=True)
-    print(f"Patient:   {core.render_plan(plan)}")
-    if plan.clinic:
-        _, key, slots = plan.clinic
-        print(f"Clinic:    {templates.render(templates.CLINIC, key, **slots)}")
-    if plan.escalate:
-        print(f"CHW:       case handed to a health worker ({plan.escalate})")
+# Runs one message through eval.simulate() - the same keyword filter, guards and
+# rules as a live SMS - for the demo case R-0142. Nothing is saved and no SMS is
+# sent. Claude is called even when a clinical keyword matches, to show its label.
 
 
 def _cli(argv):
     import sys
 
     import envfile
+    import eval as ev
 
-    global MODEL
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows consoles
     envfile.load()
-    MODEL = os.environ.get("CLASSIFY_MODEL", MODEL)  # MODEL was read before .env loaded
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit("ANTHROPIC_API_KEY is not set. Add it to .env or your shell.")
 
     today = date.today()
-    print(f"Model {MODEL}, timeout {timeout_s():g}s, today {today:%a %Y-%m-%d}")
+    case = dict(seed.DEMO_CASE, area=seed.DEMO_CASE["patient_area"])
+    facility = seed.FACILITY_BY_ID[case["facility_id"]]
+    print(f"Model {model()}, timeout {timeout_s():g}s, today {today:%a %Y-%m-%d}")
+
+    def run(text):
+        s = ev.simulate(text, case, facility, today, ev.classifier_fn(), always_call_model=True)
+        print(f"\nMessage:   {text}")
+        if s.error:
+            print(f"Claude:    FAILED ({s.error}) after {s.latency_s:.1f}s")
+        elif s.raw is not None:
+            print(f"Claude:    {json.dumps(s.raw, ensure_ascii=False)}  ({s.latency_s:.1f}s)")
+        if s.source == "keyword":
+            print("Keyword:   clinical keyword found - the live app skips Claude for this message")
+        print(f"Decision:  {s.label or s.route}  (reason: {s.reason})")
+        print(f"Patient:   {s.patient_sms or '(no SMS)'}")
+        if s.clinic_sms:
+            print(f"Clinic:    {s.clinic_sms}")
+        if s.escalate:
+            print(f"CHW:       case handed to a health worker ({s.escalate})")
+
     if argv:
-        _cli_run(" ".join(argv), today)
+        run(" ".join(argv))
         return
     while True:
         try:
@@ -261,7 +226,7 @@ def _cli(argv):
             break
         if not text:
             break
-        _cli_run(text, today)
+        run(text)
 
 
 if __name__ == "__main__":

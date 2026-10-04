@@ -33,7 +33,7 @@ FACILITIES = [
 ]
 BY_ID = {f["id"]: f for f in FACILITIES}
 AREAS = ["Kayole", "Embakasi", "Westlands", "Kibera"]
-EMERGENCY = {"name": "Demo Faraja Hospital", "number": "+254700000104"}
+EMERGENCY = {"name": "Demo Faraja Hospital"}
 
 
 # ------------------------------------------------------------------ route
@@ -217,8 +217,23 @@ def test_closed_today_suggests_an_open_facility(cid, fac, service, today, alt_na
     assert core.is_open_on(alt, today) and service in alt["services"]
 
 
+@pytest.mark.parametrize("text,emergency,clinical", [
+    ("I can't breathe", True, True),
+    ("sometimes I think about suicide", True, True),
+    ("my back hurts", False, True),           # clinical, but not an emergency
+    ("I sell chestnuts", False, False),       # whole words only
+])
+def test_emergency_terms_are_a_subset_of_clinical(text, emergency, clinical):
+    assert core.emergency_hit(text) is emergency and core.clinical_hit(text) is clinical
+
+
+@pytest.mark.parametrize("text,stop", [("STOP", True), (" stop. ", True), ("Quit", True), ("stop by friday", False)])
+def test_is_stop(text, stop):
+    assert core.is_stop(text) is stop
+
+
 def test_clinical_sms_uses_only_table_facts():
     case = {"id": "R-0142", "service": "hiv", "area": "Kayole"}
     p = core.decide(core.Classification("clinical_symptom", urgent=True), case, BY_ID["FAC-A"], FACILITIES, MON, EMERGENCY)
     sms = core.render_plan(p)
-    assert EMERGENCY["name"] in sms and EMERGENCY["number"] in sms
+    assert EMERGENCY["name"] in sms and "call 911" in sms

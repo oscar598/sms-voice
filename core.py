@@ -17,12 +17,13 @@ from datetime import date, timedelta
 
 import templates
 
-LABELS = {
+# The one list of barrier labels. classify.py sends it to Claude as the allowed enum.
+LABELS = (
     "transport", "cost", "wrong_facility", "missing_documents", "scheduling",
     "clinic_closed", "turned_away", "language", "fear_confusion",
     "clinical_symptom", "plan_ack", "unknown",
-}
-ADMIN_BARRIERS = LABELS - {"clinical_symptom", "plan_ack", "unknown"}
+)
+ADMIN_BARRIERS = set(LABELS) - {"clinical_symptom", "plan_ack", "unknown"}
 CONFIDENCE_FLOOR = 0.7
 RETURN_DATE_WINDOW_DAYS = 30
 SUPPORTED_LANGUAGES = {"en", "sw"}
@@ -30,16 +31,27 @@ AREA_MATCH_RATIO = 0.9
 
 # Whole-word, case-insensitive. False positives are acceptable: they only
 # bring a human in. Locale slang/Swahili terms are part of the list.
-CLINICAL_TERMS = [
+# EMERGENCY_TERMS are the severe subset: server.py answers them with the fixed
+# emergency reply; the referral agent treats every CLINICAL_TERMS hit as clinical.
+EMERGENCY_TERMS = [
+    "can't breathe", "cant breathe", "not breathing", "chest pain", "unconscious",
+    "heavy bleeding", "bleeding a lot", "seizure", "suicide", "suicidal",
+    "kill myself", "emergency", "dying",
+]
+CLINICAL_TERMS = EMERGENCY_TERMS + [
     "pain", "painful", "hurt", "hurts", "hurting", "ache", "aching", "bleed",
     "bleeding", "blood", "fever", "hot body", "vomit", "vomiting", "diarrhea",
-    "can't breathe", "cant breathe", "breathing", "chest", "faint", "fainted",
-    "dizzy", "seizure", "swollen", "swelling", "worse", "emergency",
+    "breathing", "chest", "faint", "fainted", "dizzy", "swollen", "swelling", "worse",
     "maumivu", "damu", "homa", "kizunguzungu", "kutapika",
 ]
-_CLINICAL_RE = re.compile(
-    r"\b(" + "|".join(re.escape(t) for t in CLINICAL_TERMS) + r")\b", re.IGNORECASE
-)
+
+
+def _terms_re(terms):
+    return re.compile(r"\b(" + "|".join(re.escape(t) for t in terms) + r")\b", re.IGNORECASE)
+
+
+_CLINICAL_RE = _terms_re(CLINICAL_TERMS)
+_EMERGENCY_RE = _terms_re(EMERGENCY_TERMS)
 
 STOP_WORDS = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
 START_WORDS = {"start", "unstop", "yes start"}
@@ -62,6 +74,14 @@ def case_id(num):
 
 def clinical_hit(text):
     return _CLINICAL_RE.search(text or "") is not None
+
+
+def emergency_hit(text):
+    return _EMERGENCY_RE.search(text or "") is not None
+
+
+def is_stop(text):
+    return _norm(text) in STOP_WORDS
 
 
 def _norm(text):
@@ -265,7 +285,7 @@ def decide(cls, case, facility, facilities, today, emergency, may_reask=False):
         return p
 
     if label == "clinical_symptom":
-        p.patient = ("clinical", {"emergency_name": emergency["name"], "emergency_number": emergency["number"]})
+        p.patient = ("clinical", {"emergency_name": emergency["name"]})
         p.escalate = "clinical"
     elif label == "unknown":
         if cls.urgent or not may_reask:

@@ -29,25 +29,31 @@ The full design and review decisions are in [docs/designs/referral-agent.md](doc
 
 ```
 sms-voice/
-├── app.py                  # Flask app: /sms webhook, /sim, /api/*, referral form, sending SMS
-├── core.py                 # Router, clinical keyword filter, guards, rules table (no I/O)
-├── classify.py             # The only Claude call: labels one patient SMS as JSON
+├── app.py                  # Referral agent: /sms webhook, /sim, /api/*, referral form, sending SMS
+├── core.py                 # Labels, keyword lists, router, guards, rules table (no I/O)
+├── classify.py             # All Claude calls (classify one SMS; server.py conversation step)
+├── eval.py                 # simulate() one message offline + the labelled-set evaluation
+├── templates.py            # Every fixed SMS the system can send
 ├── scheduler.py            # Reminders, follow-ups, completion timers (runs on each request)
 ├── db.py                   # SQLite schema and queries
-├── templates.py            # Every SMS the system can send
 ├── metrics.py              # Dashboard numbers and the clinic reliability radar
 ├── seed.py                 # Synthetic Nairobi clinics, CHW and 40 demo cases
-├── eval.py                 # Classifier evaluation against labelled messages
-├── envfile.py              # Loads .env for app.py, eval.py and classify.py
-├── home.html               # Landing page (/)
-├── referral.html           # New-referral form (/referrals/new)
-├── sim.html                # Simulated patient, CHW and clinic phones (/sim)
+├── server.py               # Missed-appointment follow-up over an Android SMS gateway
+├── directions.py           # Google Maps car / transit / bicycle directions for transport replies
+├── envfile.py              # Loads .env for the command-line entry points
+├── patients.csv            # server.py's patient list
+├── web/                    # HTML pages served by app.py
+│   ├── home.html               # Landing page (/)
+│   ├── referral.html           # New-referral form (/referrals/new)
+│   └── sim.html                # Simulated patient, CHW and clinic phones (/sim)
 ├── eval/
 │   ├── tuning.jsonl            # Labelled messages used to tune the prompt
-│   └── heldout.TEMPLATE.jsonl  # Format for the held-out set a teammate writes
+│   ├── heldout.TEMPLATE.jsonl  # Format for the held-out set a teammate writes
+│   └── reports/                # Scenario reports from tests/test_classify.py (gitignored)
 ├── tests/                  # pytest unit tests (no API key or network needed)
 │   ├── test_app.py
-│   ├── test_classify.py
+│   ├── test_classify.py        # also: `python tests/test_classify.py` writes a scenario report
+│   ├── classify_scenarios.py   # ~110 scenarios: real hospitals, public places, tricky messages
 │   ├── test_core.py
 │   ├── test_dashboard.py
 │   ├── test_envfile.py
@@ -94,7 +100,7 @@ The hosted service runs in simulator mode, so **no real SMS is sent**. Every mes
 | 2 | `how do i get there? i dont know the way` | `transport` | "To reach Demo Baraka Clinic: Matatu 33 from CBD. Address: Embakasi Rd, Embakasi." |
 | 3 | `sielewi kiingereza, naomba kiswahili` | `language` | "Umetumwa Demo Baraka Clinic kwa lab. Saa za kazi: Mon-Fri 8-4." |
 | 4 | `ok i can go monday` | `plan_ack` with a date | Patient: "Thanks! See you at Demo Baraka Clinic on <next Monday>." The **Clinic** phone also receives "R-0142 arriving <date>. Reply Y R-0142 when seen." |
-| 5 | `my stomach has felt really strange since yesterday` | `clinical_symptom`, caught by Claude because no keyword matches | Patient: "A health worker will contact you now. If severe, go to Demo Faraja County Hospital or call +254700000104." The **CHW** phone receives "CLINICAL R-0142 …" |
+| 5 | `my stomach has felt really strange since yesterday` | `clinical_symptom`, caught by Claude because no keyword matches | Patient: "A health worker will contact you now. In an urgent emergency, call 911 or go to Demo Faraja County Hospital." The **CHW** phone receives "CLINICAL R-0142 …" |
 
 The header line under the buttons shows the case status. It should move from `contacted` to `barrier_found`/`action_taken` and then `visit_scheduled`, and after message 5 it should show `escalation: clinical`.
 
@@ -138,7 +144,7 @@ Set up the `.env` file in the project root. It is gitignored. If yours has none,
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-`.env` is read by `python app.py`, `python eval.py` and `python classify.py`. Tests never read it. Variables already set in your shell take priority over the file.
+`.env` is read by `python app.py`, `python eval.py`, `python classify.py`, `python server.py` and `python tests/test_classify.py`. Tests never read it. Variables already set in your shell take priority over the file.
 
 Start the app:
 
@@ -191,6 +197,35 @@ python eval.py tuning         # run the tuning set through Claude and the rules
 python eval.py tuning --limit 10
 python eval.py heldout        # needs eval/heldout.jsonl, written by someone who did not tune the prompt
 ```
+
+### Scenario report
+
+```bash
+python tests/test_classify.py                     # all ~110 scenarios (about 110 Claude calls)
+python tests/test_classify.py --label transport   # one label; also e.g. --label rule:opt_out
+python tests/test_classify.py --limit 10 --workers 4 --no-directions
+```
+
+The scenario data is in [tests/classify_scenarios.py](tests/classify_scenarios.py):
+
+- **Hospitals:** real hospitals in New York and Nairobi. Their hours, fees and phone numbers are test values.
+- **Patient locations:** public places only, such as parks, museums, restaurants and stations, from nearby to another city. Never homes.
+- **Messages:** deliberately indirect, for every label, plus edge cases:
+  - fixed-rule replies (STOP, bare yes/no/ok),
+  - keyword false positives,
+  - prompt injection, sarcasm, a past date, an island location and a missing location.
+
+Each scenario runs through `eval.simulate()`, the same path as a live SMS. Transport results get real Google Maps directions when `GOOGLE_MAPS_API_KEY` is set.
+
+The report is written to `eval/reports/classify-<time>.md`; open it with VS Code's Markdown preview. For each scenario it shows:
+- the client, their location and referral,
+- what they wrote,
+- Claude's raw answer,
+- the final decision,
+- the exact SMS sent to the patient and clinic,
+- whether a health worker was brought in.
+
+A `.jsonl` file with the same data is written alongside it.
 
 ### Configuration
 

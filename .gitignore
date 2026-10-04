@@ -4,6 +4,7 @@ __pycache__/
 *.db
 .env
 eval/results-*.jsonl
+eval/reports/
 ngrok
 # server.py runtime data: patient conversations and atomic-write temp files
 conversations.json

@@ -30,7 +30,7 @@ FACILITIES = [
 ]
 FACILITY_BY_ID = {f["id"]: f for f in FACILITIES}
 AREAS = sorted({f["area"] for f in FACILITIES})
-EMERGENCY = {"name": "Demo Faraja County Hospital", "number": "+254700000104"}
+EMERGENCY = {"name": "Demo Faraja County Hospital"}  # the clinical SMS also says "call 911"
 CHWS = [{"id": "CHW-1", "name": "Demo CHW Amina", "phone": "+254700000201"}]
 
 DEMO_PATIENT_PHONE = "+254700000301"

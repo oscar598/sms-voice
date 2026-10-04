@@ -17,7 +17,7 @@ PATIENT = {
     "fear_confusion": "You were sent to {name} for {service}. It is a check-up, not an emergency.",
     "language_sw": "Umetumwa {name} kwa {service}. Saa za kazi: {hours}.",
     "cost": "{cost_note}",
-    "clinical": "A health worker will contact you now. If severe, go to {emergency_name} or call {emergency_number}.",
+    "clinical": "A health worker will contact you now. In an urgent emergency, call 911 or go to {emergency_name}.",
     "plan_ack": "Thanks! See you at {name} on {date}.",
     "plan_ack_nodate": "Thanks!",
     "unknown": "Thanks, a health worker will follow up.",
@@ -58,6 +58,10 @@ CHW_RELAY = "Health worker: "
 RELAY_MAX = 300
 
 STAFF_WHICH = "Which case? Reply with the case id, e.g. Y R-0142."
+
+# Closing line of every transport-directions SMS (directions.py), after the routes.
+TRANSPORT_HELP = ("If you need transportation assistance, please call us at {phone} "
+                  "and we'll be happy to help.")
 CLINIC_HELP = "Reply Y R-0142 if the patient was seen, N R-0142 if not."
 
 
