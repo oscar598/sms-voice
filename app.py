@@ -6,6 +6,7 @@ and rules land in core.py (T2); /sms only acknowledges for now.
 """
 
 import hmac
+import html
 import os
 import re
 from datetime import datetime, timedelta
@@ -90,7 +91,7 @@ def start_referral(conn, send, case, now, data=seed):
     db.add_case(conn, referred_at=now.isoformat(), **case)
     fac = data.FACILITY_BY_ID[case["facility_id"]]
     body = templates.render(templates.PATIENT, "intro", name=fac["name"], service=case["service"])
-    db.update_case(conn, case["id"], awaiting="free_text")
+    db.update_case(conn, case["id"], awaiting="barrier_q")
     send_sms(conn, send, case["id"], case["patient_phone"], body, now, advance_to="contacted")
 
 
@@ -127,6 +128,8 @@ def _execute(conn, send, case, cls, plan, body, now, data):
         fac_id, ckey, cslots = plan.clinic
         send_sms(conn, send, cid, data.FACILITY_BY_ID[fac_id]["phone"],
                  templates.render(templates.CLINIC, ckey, **cslots), now)
+    if plan.reask:
+        db.log_event(conn, cid, ts, "agent", "reask", template=key)
     if plan.escalate:
         _escalate(conn, send, case, plan.escalate, body, now, data)
     else:
@@ -160,6 +163,8 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
     if chw or clinic:
         role = "chw" if chw else "clinic"
         r = core.route(body, role)
+        if r.kind == "unparsed" and chw:
+            return _relay_from_chw(conn, send, chw, body, now)
         if r.kind == "unparsed":
             # Free text from staff is not relayed; tell them the commands instead.
             send(from_phone, templates.CHW["help"] if role == "chw" else templates.CLINIC_HELP)
@@ -187,6 +192,7 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
                 db.update_case(conn, cid, claimed_by_chw=chw["id"])
                 send_sms(conn, send, cid, from_phone,
                          templates.render(templates.CHW, "claimed", case_id=cid), now)
+                send_sms(conn, send, cid, case["patient_phone"], templates.PATIENT["chw_joined"], now)
         elif r.kind in ("chw_done", "chw_lost") and case["escalation"] == "none":
             send_sms(conn, send, cid, from_phone,
                      templates.render(templates.CHW, "not_open", case_id=cid), now)
@@ -212,6 +218,10 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
         return "no_case"
     cid = case["id"]
     r = core.route(body, "patient", case, case["awaiting"])
+    # One re-ask per non-answer: if we re-asked after their last message, a CHW takes over.
+    last_reask = db.last_event(conn, cid, ["reask"])
+    last_in = db.last_event(conn, cid, ["inbound"], actor="patient")
+    may_reask = not (last_reask and last_in and last_reask["id"] > last_in["id"])
     db.log_event(conn, cid, ts, "patient", "inbound", body=body, route=r.kind)
     db.update_case(conn, cid, reminder_count=0)  # any reply resets the reminder count
     facility = data.FACILITY_BY_ID[case["facility_id"]]
@@ -226,6 +236,24 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
         db.update_case(conn, cid, opted_out=0, awaiting="free_text")
     elif r.kind == "holding":
         send_sms(conn, send, cid, case["patient_phone"], templates.PATIENT["holding"], now)
+    elif r.kind == "relay":
+        chw_phone = next(c["phone"] for c in data.CHWS if c["id"] == case["claimed_by_chw"])
+        db.log_event(conn, cid, ts, "agent", "relayed", to_role="chw")
+        send_sms(conn, send, cid, chw_phone, templates.render(
+            templates.CHW, "from_patient", case_id=cid, quote=_quote_relay(body)), now)
+    elif r.kind in core.REASKS and not may_reask:
+        cls = core.Classification("unknown", reason="no_answer")
+        plan = core.decide(cls, case, facility, data.FACILITIES, today, data.EMERGENCY)
+        _execute(conn, send, case, cls, plan, body, now, data)
+    elif r.kind in core.REASKS:
+        sms = templates.render(templates.PATIENT, r.kind, name=facility["name"])
+        db.log_event(conn, cid, ts, "agent", "reask", template=r.kind)
+        awaiting = "barrier_q" if r.kind == "ask_again" else "free_text"
+        db.update_case(conn, cid, awaiting=awaiting)
+        send_sms(conn, send, cid, case["patient_phone"], sms, now)
+    elif r.kind == "ack_visit":
+        send_sms(conn, send, cid, case["patient_phone"], templates.render(
+            templates.PATIENT, "plan_ack", name=facility["name"], date=case["visit_date"]), now)
     elif r.kind == "yes":
         # Seen, per the patient. Clinic Y completes now; clinic silence for 48 h
         # completes as patient-reported (scheduler); clinic N is a conflict.
@@ -244,10 +272,38 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
             raw, error = None, True
             db.log_event(conn, cid, ts, "agent", "model_error", error=type(e).__name__)
         cls = core.apply_guards(raw, today, data.AREAS, facility, error=error)
-        plan = core.decide(cls, case, facility, data.FACILITIES, today, data.EMERGENCY)
+        plan = core.decide(cls, case, facility, data.FACILITIES, today, data.EMERGENCY,
+                           may_reask=may_reask)
         _execute(conn, send, case, cls, plan, body, now, data)
     conn.commit()
     return r.kind
+
+
+def _quote_relay(text):
+    text = " ".join((text or "").split())
+    return text if len(text) <= templates.RELAY_MAX else text[: templates.RELAY_MAX - 3] + "..."
+
+
+_CASE_PREFIX = re.compile(r"^\s*(?:r-?)?0*(\d{1,6})\s*[:,-]?\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def _relay_from_chw(conn, send, chw, body, now):
+    """A CHW's free text goes to the patient of the case they hold (live chat)."""
+    held = [dict(r) for r in conn.execute(
+        "SELECT * FROM cases WHERE escalation != 'none' AND claimed_by_chw = ?", (chw["id"],))]
+    m = _CASE_PREFIX.match(body or "")
+    if m and any(c["id"] == core.case_id(m.group(1)) for c in held):
+        case, text = next(c for c in held if c["id"] == core.case_id(m.group(1))), m.group(2)
+    elif len(held) == 1:
+        case, text = held[0], body
+    else:
+        send(chw["phone"], templates.CHW["many"] if held else templates.CHW["help"])
+        return "unparsed"
+    cid = case["id"]
+    db.log_event(conn, cid, now.isoformat(), "chw", "inbound", body=body, route="relay")
+    send_sms(conn, send, cid, case["patient_phone"], templates.CHW_RELAY + _quote_relay(text), now)
+    conn.commit()
+    return "relay"
 
 
 OPEN_CASE_MSG = "This phone already has an open referral."
@@ -407,6 +463,18 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
         start_referral(conn, sender, fields, now_fn())
         case = db.get_case(conn, fields["id"])
         return jsonify({"case": case, "intro_sent": case["status"] == "contacted"}), 201
+
+    links = {
+        "{{DASHBOARD_URL}}": os.environ.get("DASHBOARD_URL", "https://pixel-perfect-showcase-4501.lovable.app/"),
+        "{{REPO_URL}}": os.environ.get("REPO_URL", "https://github.com/oscar598/sms-voice"),
+    }
+
+    @app.get("/")
+    def home():
+        page = (Path(__file__).parent / "home.html").read_text()
+        for k, v in links.items():
+            page = page.replace(k, html.escape(v, quote=True))
+        return Response(page, mimetype="text/html")
 
     @app.get("/referrals/new")
     def referral_form():

@@ -230,3 +230,93 @@ def test_hosted_deploy_refuses_open_sim(monkeypatch):
     monkeypatch.delenv("SIM_PASSWORD", raising=False)
     with pytest.raises(RuntimeError, match="SIM_PASSWORD"):
         create_app(auth_token=TOKEN, conn=db.connect(), sim_mode=True)
+
+
+# ------------------------------------------------------ live CHW chat, bare replies
+
+def test_claimed_case_is_a_live_chat_both_ways():
+    client, conn = escalated_and_claimed()
+    assert outbox(client, CHW)[-1].startswith("R-0142 is yours. Texts you send here now go to the patient")
+    assert outbox(client, PATIENT)[-1] == "A health worker is now on this chat. Reply here to talk to them."
+
+    assert sim(client, CHW, "Hi, this is Amina. Can you get to the clinic today?") == "relay"
+    assert outbox(client, PATIENT)[-1] == "Health worker: Hi, this is Amina. Can you get to the clinic today?"
+
+    assert sim(client, PATIENT, "i can go at 2pm") == "relay"
+    assert outbox(client, CHW)[-1] == 'R-0142 patient: "i can go at 2pm"'
+
+    sim(client, CHW, "DONE")  # closes the chat; the patient is back with the agent
+    assert db.get_case(conn, "R-0142")["escalation"] == "none"
+    assert sim(client, CHW, "anyone there?") == "unparsed"
+    assert outbox(client, CHW)[-1].startswith("Commands:")
+
+
+def test_relay_respects_stop():
+    client, conn = escalated_and_claimed()
+    sim(client, PATIENT, "STOP")
+    before = len(outbox(client, PATIENT))
+    sim(client, CHW, "are you ok?")
+    assert len(outbox(client, PATIENT)) == before
+
+
+def test_unclaimed_escalation_still_gets_holding_reply():
+    client, conn = make()
+    client.post("/sim/referral")
+    sim(client, PATIENT, "my chest hurts")
+    assert sim(client, PATIENT, "hello?") == "holding"
+
+
+def test_bare_no_to_intro_asks_for_a_day_not_a_chw():
+    client, conn = make()
+    client.post("/sim/referral")
+    assert sim(client, PATIENT, "no") == "ask_date"
+    assert outbox(client, PATIENT)[-1] == "Great! What day will you go to Demo Baraka Clinic? Reply with the day."
+    assert outbox(client, CHW) == []
+    sim(client, PATIENT, "ok i can go monday")
+    assert db.get_case(conn, "R-0142")["visit_date"] == NEXT_MON
+
+
+def test_bare_yes_to_intro_asks_what_is_stopping_them():
+    client, conn = make()
+    client.post("/sim/referral")
+    assert sim(client, PATIENT, "Yes") == "ask_barrier"
+    assert outbox(client, PATIENT)[-1].startswith("What is stopping you from going to Demo Baraka Clinic?")
+    assert db.get_case(conn, "R-0142")["escalation"] == "none"
+
+
+def test_two_non_answers_in_a_row_bring_in_a_chw():
+    client, conn = make()
+    client.post("/sim/referral")
+    sim(client, PATIENT, "ok")      # re-asked once
+    assert outbox(client, PATIENT)[-1].endswith("Reply YES or NO.")
+    sim(client, PATIENT, "ok")      # still no answer: a human takes it
+    assert db.get_case(conn, "R-0142")["escalation"] == "non_clinical"
+    assert outbox(client, CHW)[-1].startswith("NON-CLINICAL R-0142")
+
+
+def test_unclear_message_gets_one_clarifying_question():
+    unclear = {"barrier": "unknown", "confidence": 0.9, "clinical_flag": False}
+    client, conn = make(classify_fn=lambda text, today=None: unclear)
+    client.post("/sim/referral")
+    sim(client, PATIENT, "my cousin said the thing")
+    assert outbox(client, PATIENT)[-1].startswith("Sorry, I didn't get that.")
+    assert db.get_case(conn, "R-0142")["escalation"] == "none"
+    sim(client, PATIENT, "the thing with the paper")
+    assert db.get_case(conn, "R-0142")["escalation"] == "non_clinical"
+
+
+def test_model_outage_still_escalates_at_once():
+    def down(text, today=None):
+        raise RuntimeError("down")
+    client, conn = make(classify_fn=down)
+    client.post("/sim/referral")
+    sim(client, PATIENT, "nimeshindwa kufika")
+    assert db.get_case(conn, "R-0142")["escalation"] == "clinical"
+
+
+def test_home_page_links():
+    client, _ = make()
+    page = client.get("/").get_data(as_text=True)
+    for href in ('href="/sim"', 'href="/referrals/new"', "pixel-perfect-showcase-4501.lovable.app",
+                 "github.com/oscar598/sms-voice"):
+        assert href in page

@@ -27,6 +27,12 @@ PATIENT = {
 PATIENT["followup"] = "Did you get seen at {name}? Reply YES or NO."
 PATIENT["reminder"] = "Is anything stopping you from going to {name}? Reply here."
 PATIENT["what_happened"] = "Sorry to hear that. What got in the way? Reply here."
+PATIENT["ask_barrier"] = "What is stopping you from going to {name}? E.g. transport, cost, hours, documents. Reply here."
+PATIENT["ask_date"] = "Great! What day will you go to {name}? Reply with the day."
+PATIENT["ask_again"] = "Is anything stopping you from going to {name}? Reply YES or NO."
+PATIENT["clarify"] = "Sorry, I didn't get that. What is stopping you from going to {name}? Reply here."
+PATIENT["which_barrier"] = "Which is the biggest problem right now? Reply with one, e.g. transport or cost."
+PATIENT["chw_joined"] = "A health worker is now on this chat. Reply here to talk to them."
 PATIENT["intro"] = "Hi! You were referred to {name} for {service}. Is anything stopping you from going? Reply here."
 
 CLINIC = {
@@ -37,13 +43,19 @@ CLINIC = {
 CHW = {
     # CHW/supervisor SMS may run to 2 segments (D8); the patient quote is cut to 60.
     "baton": "{kind} {case_id} ({phone}): \"{quote}\". Reply 1 {case_id} to take it.",
-    "claimed": "{case_id} is yours. Reply DONE {case_id} or LOST {case_id} when finished.",
+    "claimed": "{case_id} is yours. Texts you send here now go to the patient. Reply DONE {case_id} or LOST {case_id} when finished.",
+    "from_patient": "{case_id} patient: \"{quote}\"",
     "which": "Which case? Reply with the case id, e.g. 1 R-0142.",
     "not_open": "{case_id} has nothing waiting for a health worker.",
     "done": "{case_id} closed. Automated follow-up for the patient resumes.",
     "lost": "{case_id} marked lost. No more messages will go to the patient.",
-    "help": "Commands: 1 R-0142 to take a case, DONE R-0142 when finished, LOST R-0142 if unreachable. Call the patient to talk.",
+    "help": "Commands: 1 R-0142 to take a case, DONE R-0142 when finished, LOST R-0142 if unreachable. Once a case is yours, other texts go to the patient.",
+    "many": "You hold more than one case. Start with the case id: R-0142 your message.",
 }
+
+# Prefix on a CHW's own words relayed to the patient (human-written, not a template).
+CHW_RELAY = "Health worker: "
+RELAY_MAX = 300
 
 STAFF_WHICH = "Which case? Reply with the case id, e.g. Y R-0142."
 CLINIC_HELP = "Reply Y R-0142 if the patient was seen, N R-0142 if not."

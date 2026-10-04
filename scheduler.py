@@ -79,7 +79,8 @@ def tick(conn, send, now, data):
         if case["status"] in OPEN and case["awaiting"] and not case["opted_out"] and quiet_since \
                 and now - quiet_since >= REPLY_WAIT:
             if case["reminder_count"] < MAX_REMINDERS:
-                db.update_case(conn, cid, reminder_count=case["reminder_count"] + 1)
+                db.update_case(conn, cid, reminder_count=case["reminder_count"] + 1,
+                               awaiting="barrier_q")  # the reminder asks "is anything stopping you?"
                 send_sms(conn, send, cid, phone,
                          templates.render(templates.PATIENT, "reminder", name=fac["name"]), now)
                 done.append((cid, "reminder"))

@@ -45,6 +45,11 @@ STOP_WORDS = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
 START_WORDS = {"start", "unstop", "yes start"}
 YES_WORDS = {"yes", "y", "ndio", "ndiyo"}
 NO_WORDS = {"no", "n", "hapana"}
+# Short replies that answer nothing on their own ("ok" to "is anything stopping you?").
+ACK_WORDS = {"ok", "okay", "k", "sawa", "sure", "fine", "alright", "thanks", "thank you",
+             "asante", "asante sana", "nope", "yeah", "yep", "yes please"}
+# Re-asks: a bare reply gets one more question before a CHW is brought in.
+REASKS = {"ask_barrier", "ask_date", "ask_again"}
 
 _CASE_REF = r"(?:r-?)?0*(\d{1,6})"
 _CHW_RE = re.compile(rf"^\s*(1|done|lost)(?:\s+{_CASE_REF})?\s*$", re.IGNORECASE)
@@ -68,7 +73,8 @@ def _norm(text):
 
 @dataclass
 class Route:
-    kind: str  # clinical | opt_out | opt_in | ignore | yes | no | holding | classify
+    kind: str  # clinical | opt_out | opt_in | ignore | yes | no | holding | relay | classify
+    #            ask_barrier | ask_date | ask_again | ack_visit
     #            chw_claim | chw_done | chw_lost | clinic_seen | clinic_not_seen | unparsed
     case_id: str = None
 
@@ -116,9 +122,21 @@ def route(body, role, case=None, open_prompt=None):
         if text in NO_WORDS:
             return Route("no")
 
-    # R6 (user): a stuck case stays stuck and gets a fixed holding reply.
-    if case.get("escalation", "none") != "none" or open_prompt is None:
+    # R6 (user): a stuck case stays stuck and gets a fixed holding reply, unless a
+    # CHW has taken it: then the patient is talking to that CHW, live.
+    if case.get("escalation", "none") != "none":
+        return Route("relay") if case.get("claimed_by_chw") else Route("holding")
+    if open_prompt is None:
         return Route("holding")
+
+    # A bare yes / no / ok carries no barrier: answer it by rule, not by the model.
+    yes, no = text in YES_WORDS or text in {"yeah", "yep"}, text in NO_WORDS or text == "nope"
+    if open_prompt != "yes_no" and (yes or no or text in ACK_WORDS):
+        if open_prompt == "barrier_q":  # "Is anything stopping you from going?"
+            return Route("ask_barrier" if yes else "ask_date" if no else "ask_again")
+        if no:
+            return Route("ask_barrier")
+        return Route("ack_visit" if case.get("visit_date") else "ask_date")
 
     return Route("classify")
 
@@ -203,6 +221,7 @@ class Plan:
     set_visit_date: str = None
     repoint_to: str = None
     radar_event: str = None  # facility id the barrier counts against
+    reask: bool = False  # asked the patient once more instead of escalating
 
 
 def is_open_on(facility, day):
@@ -230,8 +249,12 @@ def _visit(plan, case, facility, d):
     plan.clinic = (facility["id"], "arriving", {"case_id": case["id"], "date": d})
 
 
-def decide(cls, case, facility, facilities, today, emergency):
-    """Map a guarded label to exactly one approved workflow."""
+def decide(cls, case, facility, facilities, today, emergency, may_reask=False):
+    """Map a guarded label to exactly one approved workflow.
+
+    may_reask: the previous patient message did not already get a re-ask, so a
+    non-urgent "unknown" asks once more before a CHW is brought in.
+    """
     label, fl = cls.label, cls.fields
     p = Plan()
     base = {**_slots(facility), "service": case["service"]}
@@ -245,7 +268,11 @@ def decide(cls, case, facility, facilities, today, emergency):
         p.patient = ("clinical", {"emergency_name": emergency["name"], "emergency_number": emergency["number"]})
         p.escalate = "clinical"
     elif label == "unknown":
-        to_human(clinical=cls.urgent)
+        if cls.urgent or not may_reask:
+            return to_human(clinical=cls.urgent)
+        key = "which_barrier" if cls.reason == "multi_barrier" else "clarify"
+        p.patient = (key, base)
+        p.reask = True
     elif label == "transport":
         p.patient = ("transport", {**base, "transport_note": facility["transport_note"]})
     elif label == "cost":
