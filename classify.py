@@ -142,3 +142,129 @@ def classify(text, today=None, client=None, meta=None):
     # Nulls mean "not stated"; core.validate_fields() expects them absent.
     out["fields"] = {k: v for k, v in (out.get("fields") or {}).items() if v is not None}
     return out
+
+
+def chat_json(system, messages, schema, timeout=None, client=None, max_tokens=4096):
+    """One multi-turn Claude call that must return JSON matching `schema`.
+
+    `messages` is [{"role": "user"|"assistant", "content": str}, ...] ending with
+    a user turn. Used by server.py. Same failure contract as classify(): any
+    problem raises ClassifierUnavailable, never a guessed answer.
+    """
+    turns = [{"role": m["role"], "content": m["content"]} for m in messages]
+    if turns and turns[0]["role"] != "user":
+        # The API requires a user turn first; ours often open with the clinic's SMS.
+        turns.insert(0, {"role": "user", "content": "(The clinic starts the conversation.)"})
+    try:
+        client = client or _default_client()
+        if timeout is not None:
+            client = client.with_options(timeout=timeout)
+        response = client.beta.messages.create(
+            model=MODEL,
+            max_tokens=max_tokens,  # thinking is always on for this model; leave room for it
+            betas=[FALLBACK_BETA],
+            fallbacks="default",
+            system=system,
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+            messages=turns,
+        )
+    except anthropic.AnthropicError as e:
+        raise ClassifierUnavailable(type(e).__name__) from e
+    except TypeError as e:
+        if "authentication" not in str(e):
+            raise
+        raise ClassifierUnavailable("no credentials") from e
+
+    if response.stop_reason != "end_turn":
+        raise ClassifierUnavailable(f"stop_reason={response.stop_reason}")
+    text_block = next((b for b in response.content if b.type == "text"), None)
+    if text_block is None:
+        raise ClassifierUnavailable("no text block")
+    try:
+        return json.loads(text_block.text)
+    except json.JSONDecodeError as e:
+        raise ClassifierUnavailable("invalid json") from e
+
+
+# ------------------------------------------------------------- command line
+# python classify.py "went there yesterday the gate was locked"
+# python classify.py            (interactive: type messages, empty line to quit)
+#
+# Sends one patient message to Claude and prints what the agent would do for
+# the demo case R-0142, through the same guards and rules as a live SMS.
+# Nothing is written to the database and no SMS is sent. Unlike the app, it
+# calls Claude even when a clinical keyword matches, to show the model's label.
+# Imports stay inside the functions so importing this module is unchanged.
+
+
+def _cli_run(text, today):
+    import time
+
+    import core
+    import seed
+    import templates
+
+    case = dict(seed.DEMO_CASE, area=seed.DEMO_CASE["patient_area"])
+    facility = seed.FACILITY_BY_ID[case["facility_id"]]
+
+    start = time.monotonic()
+    try:
+        raw, error = classify(text, today), None
+    except ClassifierUnavailable as e:
+        raw, error = None, str(e)
+    latency = time.monotonic() - start
+
+    print(f"\nMessage:   {text}")
+    if error:
+        print(f"Claude:    FAILED ({error}) after {latency:.1f}s")
+    else:
+        print(f"Claude:    {json.dumps(raw, ensure_ascii=False)}  ({latency:.1f}s)")
+
+    cls = core.apply_guards(raw, today, seed.AREAS, facility, error=error is not None)
+    if core.clinical_hit(text):
+        # The live router never reaches Claude here; the keyword decides.
+        cls = core.Classification("clinical_symptom", urgent=True, reason="keyword")
+        print("Keyword:   clinical keyword found - the live app skips Claude for this message")
+    print(f"Decision:  {cls.label}  (reason: {cls.reason})")
+
+    plan = core.decide(cls, case, facility, seed.FACILITIES, today, seed.EMERGENCY, may_reask=True)
+    print(f"Patient:   {core.render_plan(plan)}")
+    if plan.clinic:
+        _, key, slots = plan.clinic
+        print(f"Clinic:    {templates.render(templates.CLINIC, key, **slots)}")
+    if plan.escalate:
+        print(f"CHW:       case handed to a health worker ({plan.escalate})")
+
+
+def _cli(argv):
+    import sys
+
+    import envfile
+
+    global MODEL
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows consoles
+    envfile.load()
+    MODEL = os.environ.get("CLASSIFY_MODEL", MODEL)  # MODEL was read before .env loaded
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        sys.exit("ANTHROPIC_API_KEY is not set. Add it to .env or your shell.")
+
+    today = date.today()
+    print(f"Model {MODEL}, timeout {timeout_s():g}s, today {today:%a %Y-%m-%d}")
+    if argv:
+        _cli_run(" ".join(argv), today)
+        return
+    while True:
+        try:
+            text = input("\npatient> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not text:
+            break
+        _cli_run(text, today)
+
+
+if __name__ == "__main__":
+    import sys
+
+    _cli(sys.argv[1:])

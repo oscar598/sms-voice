@@ -38,8 +38,7 @@ sms-voice/
 ├── metrics.py              # Dashboard numbers and the clinic reliability radar
 ├── seed.py                 # Synthetic Nairobi clinics, CHW and 40 demo cases
 ├── eval.py                 # Classifier evaluation against labelled messages
-├── try_claude.py           # Send one message to Claude from the command line, print the decision
-├── envfile.py              # Loads .env for app.py, eval.py and try_claude.py
+├── envfile.py              # Loads .env for app.py, eval.py and classify.py
 ├── home.html               # Landing page (/)
 ├── referral.html           # New-referral form (/referrals/new)
 ├── sim.html                # Simulated patient, CHW and clinic phones (/sim)
@@ -139,7 +138,7 @@ Set up the `.env` file in the project root. It is gitignored. If yours has none,
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-`.env` is read by `python app.py`, `python eval.py` and `python try_claude.py`. Tests never read it. Variables already set in your shell take priority over the file.
+`.env` is read by `python app.py`, `python eval.py` and `python classify.py`. Tests never read it. Variables already set in your shell take priority over the file.
 
 Start the app:
 
@@ -165,11 +164,11 @@ To fill the dashboard with the 40 synthetic demo cases, stop the app and run `py
 
 ### Test Claude from the command line
 
-[try_claude.py](try_claude.py) sends one patient message to Claude and prints what the agent would do. It uses demo case R-0142 and does not need the server or dashboard. Nothing is saved and no SMS is sent.
+Run [classify.py](classify.py) directly to send one patient message to Claude and print what the agent would do. It uses demo case R-0142 and does not need the server or dashboard. Nothing is saved and no SMS is sent.
 
 ```bash
-python try_claude.py "went there yesterday the gate was locked, nobody there"
-python try_claude.py          # interactive: type messages, empty line to quit
+python classify.py "went there yesterday the gate was locked, nobody there"
+python classify.py            # interactive: type messages, empty line to quit
 ```
 
 Example output:

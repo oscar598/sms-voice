@@ -3,4 +3,6 @@ twilio==9.11.2
 # Pinned: anthropic 1.x has breaking changes (httpx2, Python >= 3.10); this is the version tested.
 anthropic==0.125.0
 gunicorn==23.0.0
+# server.py talks to the Android SMS gateway over HTTP.
+requests==2.34.2
 pytest==8.4.2
