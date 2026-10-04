@@ -225,13 +225,19 @@ How one incoming SMS moves through the code:
         ├── CHW     ─► command: 1 / DONE / LOST R-0142, other text is relayed to the patient
         ├── Clinic  ─► reply:   Y / N R-0142 (seen or not seen)
         └── Patient ─► ROUTER, checked in this order:       core.route()
-              1. Opted out?             only START is accepted, everything else is ignored
-              2. Clinical keyword?      "pain", "fever", "damu" … ─► clinical path, Claude skipped
-              3. STOP / START           opt out / opt back in
-              4. Exact YES / NO         answer to an open follow-up question
-              5. Escalated, or nothing asked?  relay to the CHW who claimed it, or a holding reply
-              6. Bare "ok" / "yes" / "no" to other questions ─► rule-based follow-up question
-              7. Anything else          ─► Claude
+              1. "transport"
+              2. "cost"
+              3. "wrong_facuility"
+              4. "missing_documents"
+              5. "scheduling"
+              6. "clinic_closed"
+              7. "turned_away"
+              8. "language"
+              9. "fear_confusion"
+              10. "clinical_sympton"
+              11. "plan_ack"
+              12. "unknown"
+
                         │
                         ▼
  Claude labels the message (JSON only)                      classify.py
