@@ -113,6 +113,33 @@ def test_guards(cid, r, error, label, urgent, reason):
     assert (c.label, c.urgent, c.reason) == (label, urgent, reason)
 
 
+NEXT_MON = {"return_date": "2026-10-12"}
+RESCHEDULE_CASES = [
+    # (id, raw, label, reason, logged barrier)
+    ("turned away, new date -> plan_ack", raw("turned_away", fields=NEXT_MON), "plan_ack", "rescheduled", "turned_away"),
+    ("plan_ack + turned_away mention", raw("plan_ack", also_mentions=["turned_away"], fields=NEXT_MON),
+     "plan_ack", "rescheduled", "turned_away"),
+    ("turned away, no date", raw("turned_away"), "turned_away", "ok", "turned_away"),
+    ("turned away, date out of window", raw("turned_away", fields={"return_date": "2027-01-01"}),
+     "turned_away", "ok", "turned_away"),
+    ("plain plan_ack logs nothing", raw("plan_ack", fields=NEXT_MON), "plan_ack", "ok", None),
+]
+
+
+@pytest.mark.parametrize("cid,r,label,reason,logged", RESCHEDULE_CASES, ids=[c[0] for c in RESCHEDULE_CASES])
+def test_turned_away_then_rescheduled_is_plan_ack(cid, r, label, reason, logged):
+    c = core.apply_guards(r, MON, AREAS, BY_ID["FAC-B"])
+    assert (c.label, c.reason, c.logged_barrier) == (label, reason, logged)
+
+
+def test_rescheduled_reply_is_plan_ack_but_counts_on_radar():
+    cls = core.apply_guards(raw("turned_away", fields=NEXT_MON), MON, AREAS, BY_ID["FAC-B"])
+    p = core.decide(cls, {"id": "R-0142", "service": "tb", "area": "Embakasi"}, BY_ID["FAC-B"],
+                    FACILITIES, MON, EMERGENCY)
+    assert p.patient[0] == "plan_ack" and p.set_visit_date == "2026-10-12"
+    assert p.clinic[0] == "FAC-B" and p.radar_event == "FAC-B" and p.escalate is None
+
+
 FIELD_CASES = [
     # (id, raw fields, expected validated fields)
     ("date in window", {"return_date": (MON + timedelta(days=30)).isoformat()}, {"return_date": "2026-11-04"}),
@@ -157,8 +184,6 @@ DECIDE_CASES = [
      "unknown", "non_clinical", None, None, "FAC-C", None),
     ("closed + return date", "clinic_closed", {"return_date": D}, False, "FAC-A", "lab", MON,
      "clinic_hours", None, D, "FAC-A", "FAC-A", None),
-    ("turned away with date", "turned_away", {"return_date": D}, False, "FAC-B", "tb", MON,
-     "turned_away", None, D, "FAC-B", "FAC-B", None),
     ("turned away no date", "turned_away", {}, False, "FAC-B", "tb", MON,
      "unknown", "non_clinical", None, None, "FAC-B", None),
     ("wrong facility reroute", "wrong_facility", {"area": "Kayole"}, False, "FAC-A", "eye", MON,

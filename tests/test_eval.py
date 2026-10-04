@@ -82,9 +82,10 @@ def test_missing_heldout_explains_who_writes_it(tmp_path, monkeypatch):
 
 def test_tuning_set_is_well_formed():
     rows = ev.load("tuning")
-    assert len(rows) == 100
     counts = {label: sum(r["label"] == label for r in rows) for label in core.LABELS}
-    assert counts["clinical_symptom"] == 15 and counts["unknown"] == 15
+    assert min(counts.values()) >= 10, counts
+    assert counts["clinical_symptom"] >= 15 and counts["unknown"] >= 15
+    assert len({r["text"].strip().lower() for r in rows}) == len(rows)  # no duplicate messages
     for row in rows:  # every gold row maps to a workflow, so gold actions are computable
         gold = core.Classification(row["label"], row.get("fields", {}))
         ev.action(gold)

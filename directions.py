@@ -1,10 +1,15 @@
-"""Car, public-transport and bicycle directions for the transport barrier (server.py).
+"""Car, public-transport and bicycle directions for the transport barrier.
 
 Uses the Google Maps Routes API (computeRoutes) to find one driving route, one
 transit route and, when the ride takes an hour or less, one cycling route from
-the patient's address to the clinic, and turns them into plain SMS text. Code writes these facts, never the model, so a route can't be
+the patient's location to the clinic, and turns them into one SMS of at most
+SMS_MAX_CHARS. Code writes these facts, never the model, so a route can't be
 invented. Any failure (no key, no address, API error, no route found) degrades
 to "here is the clinic address" rather than raising.
+
+Example (160 chars max; the help number follows in a second SMS):
+  Mount Sinai Hospital is at 1 Gustave L. Levy Place, New York, NY 10029. It's
+  7 min by car, 22 min on the M15 bus ($3.00) or 10 min by bike.
 """
 
 import os
@@ -12,19 +17,24 @@ import re
 
 import requests
 
+import sms
+
 ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 TIMEOUT_S = 10
-MAX_SMS_CHARS = 480  # about three SMS segments
 MAX_BIKE_SECONDS = 60 * 60  # longer rides are not suggested
+MODES = ("DRIVE", "TRANSIT", "BICYCLE")
 FIELD_MASK = ",".join([
-    "routes.duration", "routes.distanceMeters", "routes.description",
-    "routes.localizedValues", "routes.legs.steps.travelMode",
-    "routes.legs.steps.transitDetails",
+    "routes.duration", "routes.localizedValues",
+    "routes.legs.steps.travelMode", "routes.legs.steps.transitDetails",
 ])
 
 
 def api_key():
     return os.environ.get("GOOGLE_MAPS_API_KEY", "")
+
+
+class RouteError(Exception):
+    pass
 
 
 def compute_route(origin, destination, mode, key=None, post=requests.post):
@@ -39,12 +49,8 @@ def compute_route(origin, destination, mode, key=None, post=requests.post):
         # for TRANSIT, WALK and BICYCLE with a 400.
         body["routingPreference"] = "TRAFFIC_AWARE"
     try:
-        r = post(
-            ROUTES_URL,
-            headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": FIELD_MASK},
-            json=body,
-            timeout=TIMEOUT_S,
-        )
+        r = post(ROUTES_URL, headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": FIELD_MASK},
+                 json=body, timeout=TIMEOUT_S)
         if not r.ok:
             raise RouteError(f"HTTP {r.status_code}: {r.text[:200]}")
         routes = r.json().get("routes") or []
@@ -53,54 +59,25 @@ def compute_route(origin, destination, mode, key=None, post=requests.post):
     return routes[0] if routes else None
 
 
-class RouteError(Exception):
-    pass
+# ------------------------------------------------------------- short phrases
 
 
-def _seconds(duration):
-    """'1234s' -> 1234, or None."""
-    m = re.fullmatch(r"(\d+)s", str(duration or ""))
+def _seconds(route):
+    m = re.fullmatch(r"(\d+)s", str(route.get("duration") or ""))
     return int(m.group(1)) if m else None
 
 
-def _minutes(duration):
-    """'1234s' -> '21 min'."""
-    secs = _seconds(duration)
+def _time(route):
+    """'7 min', '1 hr 9 min' (compact, for one SMS)."""
+    secs = _seconds(route)
     if secs is None:
-        return None
+        return route.get("localizedValues", {}).get("duration", {}).get("text")
     mins = max(1, round(secs / 60))
-    return f"{mins // 60} h {mins % 60} min" if mins >= 60 else f"{mins} min"
-
-
-def _duration(route):
-    return (route.get("localizedValues", {}).get("duration", {}).get("text")
-            or _minutes(route.get("duration")))
-
-
-def _distance(route):
-    text = route.get("localizedValues", {}).get("distance", {}).get("text")
-    if text:
-        return text
-    meters = route.get("distanceMeters")
-    return f"{meters / 1000:.1f} km" if meters else None
-
-
-def _trip(route):
-    """'about 7 mins (2.7 km)', whichever parts are known."""
-    dur, dist = _duration(route), _distance(route)
-    return " ".join(p for p in (f"about {dur}" if dur else None, f"({dist})" if dist else None) if p)
-
-
-def _via(route):
-    return f" along {route['description']}" if route.get("description") else ""
-
-
-def describe_drive(route):
-    return f"Driving takes {_trip(route) or 'a short time'}{_via(route)}."
+    return f"{mins // 60} hr {mins % 60} min" if mins >= 60 else f"{mins} min"
 
 
 def _ride_name(vehicle, name):
-    """'the 6 Train', 'the N Line', 'the 51 bus', 'matatu 46'."""
+    """'the 6 Train', 'the N Line', 'the M15 bus', 'a matatu'."""
     if not name:
         return f"a {vehicle}"
     if any(w in name.lower() for w in ("train", "line", "lirr")):
@@ -108,92 +85,88 @@ def _ride_name(vehicle, name):
     return f"the {name} {vehicle}"
 
 
-MAX_RIDES_SHOWN = 3  # longer trips list the first rides and the last one
-
-
-def describe_transit(route, max_rides=MAX_RIDES_SHOWN):
+def _rides(route):
     rides = []
     for leg in route.get("legs", []):
         for step in leg.get("steps", []):
             t = step.get("transitDetails")
-            if step.get("travelMode") != "TRANSIT" or not t:
-                continue
-            line = t.get("transitLine", {})
-            vehicle = (line.get("vehicle", {}).get("name", {}).get("text") or "bus").lower()
-            name = line.get("nameShort") or line.get("name") or ""
-            stops = t.get("stopDetails", {})
-            frm = stops.get("departureStop", {}).get("name")
-            to = stops.get("arrivalStop", {}).get("name")
-            ride = _ride_name(vehicle, name)
-            if frm:
-                ride += f" from {frm}"
-            if to:
-                ride += f" to {to}"
-            rides.append(ride)
+            if step.get("travelMode") == "TRANSIT" and t:
+                line = t.get("transitLine", {})
+                vehicle = (line.get("vehicle", {}).get("name", {}).get("text") or "bus").lower()
+                rides.append(_ride_name(vehicle, line.get("nameShort") or line.get("name") or ""))
+    return rides
+
+
+def phrase(mode, route, detail=2):
+    """One mode as a short phrase, or None if it shouldn't be suggested.
+
+    detail 2: every ride and the fare; 1: the first ride; 0: just "by public transport".
+    """
+    t = _time(route)
+    if not t:
+        return None
+    if mode == "DRIVE":
+        return f"{t} by car"
+    if mode == "BICYCLE":
+        secs = _seconds(route)
+        return f"{t} by bike" if secs is not None and secs <= MAX_BIKE_SECONDS else None
+    rides = _rides(route)
     if not rides:
         return None  # a "transit" route that is all walking is not a transit suggestion
-    dur = _duration(route)
+    if detail == 0:
+        return f"{t} by public transport"
+    if detail == 1:
+        return f"{t} on {rides[0]}" + (" and more" if len(rides) > 1 else "")
     fare = route.get("localizedValues", {}).get("transitFare", {}).get("text")
-    head = f"By public transport it's about {dur}" if dur else "By public transport"
-    if fare:
-        head += f" and costs {fare}"
-    if max_rides == 1 and len(rides) > 1:
-        return f"{head}, starting with {rides[0]}."  # shortest form, for long trips
-    if len(rides) > max_rides:
-        rides = rides[: max_rides - 1] + [f"a few more connections, and finally {rides[-1]}"]
-    return f"{head}: take " + ", then ".join(rides) + "."
+    return f"{t} on " + " then ".join(rides) + (f" ({fare})" if fare else "")
 
 
-def describe_bike(route):
-    secs = _seconds(route.get("duration"))
-    if secs is None or secs > MAX_BIKE_SECONDS:
-        return None  # over an hour by bike (or unknown) is not a sensible suggestion
-    return f"If you'd rather cycle, it's {_trip(route)}{_via(route)}."
+def _join(parts):
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return f"It's {parts[0]}."
+    return f"It's {', '.join(parts[:-1])} or {parts[-1]}."
 
 
-def transport_sms(patient_address, clinic_name, clinic_address, key=None, post=requests.post,
-                  log=print, footer=""):
-    """SMS text: clinic address, then car, transit and (if an hour or less) bicycle routes.
+def compose(clinic_name, clinic_address, routes):
+    """The richest message that fits SMS_MAX_CHARS.
 
-    `footer` (e.g. the transportation-assistance line) always survives the length
-    cap; the routes are shortened instead.
+    The full address, the car and the bus matter most; the bike is the first
+    thing given up, then transit detail, then the clinic name and the full
+    address. The help number goes in its own SMS (core.help_sms).
     """
-    address_only = f"We're at {clinic_name}, {clinic_address}."
+    short = clinic_address.split(",")[0].strip()
+    heads = [f"{clinic_name} is at {clinic_address}.", f"{clinic_name} is at {short}.", f"We're at {short}."]
+    bike, no_bike, car_only = [], ["BICYCLE"], ["BICYCLE", "TRANSIT"]
+    tries = ([(bike, heads[0], d) for d in (2, 1)]
+             + [(no_bike, h, d) for h in heads for d in (2, 1, 0)]
+             + [(car_only, h, 0) for h in heads] + [(list(MODES), h, 0) for h in heads])
+    for drop, head, detail in tries:
+        parts = [p for m in MODES if m in routes and m not in drop for p in [phrase(m, routes[m], detail)] if p]
+        text = sms.to_gsm(" ".join(x for x in (head, _join(parts)) if x))
+        if len(text) <= sms.limit():
+            return text
+    return sms.fit(heads[-1])
+
+
+def transport_sms(patient_address, clinic_name, clinic_address, key=None, post=requests.post, log=print):
+    """One SMS: where the clinic is, then car / transit / bike (if an hour or less)."""
     key = key or api_key()
+    routes = {}
     if not key or not patient_address:
-        log("  directions skipped: " + ("GOOGLE_MAPS_API_KEY is not set" if not key
-                                        else "patient has no address"))
-        return "\n".join(filter(None, [address_only, footer]))
-    found = {}  # mode -> [line text, route]
-    for mode, describe in (("DRIVE", describe_drive), ("TRANSIT", describe_transit),
-                           ("BICYCLE", describe_bike)):
-        try:
-            route = compute_route(patient_address, clinic_address, mode, key=key, post=post)
-        except RouteError as e:
-            log(f"  directions {mode} failed: {e}")
-            continue
-        text = describe(route) if route else None
-        if text:
-            found[mode] = [text, route]
-        elif route and mode == "BICYCLE":
-            log(f"  directions: bicycle not suggested ({_duration(route)} is over an hour)")
-        else:
-            log(f"  directions: no {mode} route found")
-    head = f"Here's how to get to {clinic_name} at {clinic_address}:" if found else address_only
-    room = MAX_SMS_CHARS - (len(footer) + 1 if footer else 0)
-
-    def render():
-        return "\n".join([head] + [text for text, _ in found.values()])
-
-    # Over the limit: first shorten a long public-transport trip (first and last ride,
-    # then just the first ride), then drop whole suggestions from the end (bike, then transit), and only as a
-    # last resort cut mid-sentence, so the message still reads like a person wrote it.
-    for max_rides in (2, 1):
-        if len(render()) > room and "TRANSIT" in found:
-            found["TRANSIT"][0] = describe_transit(found["TRANSIT"][1], max_rides=max_rides)
-    while len(render()) > room and len(found) > 1:
-        found.pop(list(found)[-1])
-    sms = render()
-    if len(sms) > room:
-        sms = sms[: room - 3] + "..."
-    return "\n".join(filter(None, [sms, footer]))
+        log("  directions skipped: " + ("GOOGLE_MAPS_API_KEY is not set" if not key else "patient has no address"))
+    else:
+        for mode in MODES:
+            try:
+                route = compute_route(patient_address, clinic_address, mode, key=key, post=post)
+            except RouteError as e:
+                log(f"  directions {mode} failed: {e}")
+                continue
+            if route and phrase(mode, route):
+                routes[mode] = route
+            elif route and mode == "BICYCLE":
+                log(f"  directions: bicycle not suggested ({_time(route)} is over an hour)")
+            else:
+                log(f"  directions: no {mode} route found")
+    return compose(clinic_name, clinic_address, routes)

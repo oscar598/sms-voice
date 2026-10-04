@@ -65,6 +65,7 @@ import classify  # noqa: E402
 import core  # noqa: E402
 import clinics  # noqa: E402
 import directions  # noqa: E402
+import sms  # noqa: E402
 import templates  # noqa: E402
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://192.168.43.1:8080").rstrip("/")
@@ -76,7 +77,6 @@ PATIENTS_CSV = os.environ.get("PATIENTS_CSV", "patients.csv")
 CONVOS_JSON = os.environ.get("CONVOS_JSON", "conversations.json")
 
 MAX_TURNS = 4            # patient messages before handing off to staff
-MAX_REPLY_CHARS = 300    # about two SMS segments
 MIN_CONFIDENCE = 0.6
 
 EXTRA_COLUMNS = ["miss_reason", "wants_reschedule", "needs_followup", "opted_out", "last_reply"]
@@ -97,14 +97,15 @@ Your goals, in order:
 
 Rules you must follow:
 - Reply in the SAME LANGUAGE the patient writes in.
-- Keep replies under 250 characters, plain text, no emojis, warm and simple.
+- Keep each reply to one SMS: at most {sms.limit()} characters, plain text, no emojis,
+  warm and simple, like a person at the front desk would text.
 - NEVER give medical advice, diagnose, or comment on symptoms or medication.
   If they ask a medical question, say a health worker will call them.
 - NEVER confirm or book a specific appointment time. Say clinic staff will confirm it.
 - NEVER mention the reason for their visit or any health condition.
 - Do not invent facts about the clinic (hours, prices, services, transport).
-- If transport is the problem, do not give directions or a phone number yourself: the
-  clinic's system texts them the clinic address, routes and a help number separately.
+- Do not give directions or a phone number yourself: the clinic's system texts the
+  clinic address and routes (for transport) and the clinic's help number separately.
 - If you are unsure what they mean, ask one short clarifying question.
 
 Fill in every field of the JSON response:
@@ -208,7 +209,8 @@ def clean_number(phone: str) -> str:
 
 
 def gateway_send(phone: str, text: str, dry_run: bool = False) -> bool:
-    phone = clean_number(phone)
+    """Every server.py SMS goes out here, so this is where SMS_MAX_CHARS is enforced."""
+    phone, text = clean_number(phone), sms.fit(text)
     if dry_run:
         return True
     try:
@@ -231,9 +233,9 @@ def opening_message(p: dict) -> str:
     # Says nothing about WHY the visit was booked: phones are often shared.
     first = p["name"].split()[0]
     when = datetime.strptime(p["appointment_datetime"], "%Y-%m-%d %H:%M")
-    return (f"Hello {first}, this is the clinic. We missed you at your appointment on "
-            f"{when.strftime('%a %d %b')}. Is everything okay? Could you tell us why you "
-            f"could not come? Reply STOP to stop messages.")
+    return sms.fit(f"Hi {first}, this is the clinic. We missed you at your appointment on "
+                   f"{when.strftime('%a %d %b')}. We hope everything is well. What kept you from coming? "
+                   f"Reply STOP to opt out.")
 
 
 # ---------------- the AI step ----------------
@@ -255,7 +257,7 @@ def ask_claude(history: list[dict]) -> dict | None:
     except (TypeError, ValueError):
         conf = 0.0
     return {
-        "reply": reply[:MAX_REPLY_CHARS],
+        "reply": sms.fit(reply),  # stored as sent, so the conversation history matches the phone
         "reason": out.get("reason") if out.get("reason") in REASONS else "unclear",
         "wants_reschedule": out.get("wants_reschedule") if isinstance(out.get("wants_reschedule"), bool) else None,
         "preferred_time": str(out.get("preferred_time") or "")[:100],
@@ -279,13 +281,18 @@ def clinic_for(patient: dict) -> dict | None:
 
 
 def transport_directions(patient: dict) -> str | None:
-    """Clinic address, car / public transport / bicycle routes, and the assistance line."""
+    """Clinic address and car / public transport / bicycle routes, in one SMS."""
     clinic = clinic_for(patient)
     if clinic is None:
         return None
-    help_line = templates.TRANSPORT_HELP.format(phone=clinic["phone"]) if clinic["phone"] else ""
     return directions.transport_sms(patient.get("address", "").strip(), clinic["name"],
-                                    clinic["address"], log=log, footer=help_line)
+                                    clinic["address"], log=log)
+
+
+def help_message(patient: dict) -> str | None:
+    """The same second SMS after every barrier reply: who to call for more help."""
+    clinic = clinic_for(patient)
+    return templates.HELP_SMS.format(phone=clinic["phone"]) if clinic and clinic["phone"] else None
 
 
 def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
@@ -301,7 +308,7 @@ def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
 
         convo = convos.setdefault(k, {"patient_id": patient["patient_id"],
                                       "status": "open", "messages": []})
-        extra = None  # a second SMS after the reply (transport directions)
+        extra = None  # the help SMS after the first barrier reply
         convo["messages"].append({"role": "user", "content": text,
                                   "time": datetime.now().isoformat(timespec="seconds")})
         patient["last_reply"] = text
@@ -350,9 +357,15 @@ def handle_message(phone: str, text: str, dry_run: bool = False) -> str | None:
                 if d["done"]:
                     convo["status"] = "closed"
                 if d["reason"] == "transport" and not convo.get("directions_sent"):
-                    # Facts come from Google Maps via code, never from Claude; once per conversation.
-                    extra = transport_directions(patient)
-                    convo["directions_sent"] = bool(extra)
+                    # The personalized SMS is the directions: facts from Google Maps via
+                    # code, never from Claude. Once per conversation.
+                    route_sms = transport_directions(patient)
+                    reply = route_sms or reply
+                    convo["directions_sent"] = bool(route_sms)
+                if d["reason"] != "unclear" and not convo.get("help_sent"):
+                    # Second SMS, the same for every barrier; once per conversation.
+                    extra = help_message(patient)
+                    convo["help_sent"] = bool(extra)
                 log(f"  {pid} reason={d['reason']} reschedule={d['wants_reschedule']} "
                     f"time={d['preferred_time']!r} staff={d['needs_staff']} "
                     f"done={d['done']} conf={d['confidence']:.2f}")
@@ -497,10 +510,11 @@ def cmd_chat(pid: str) -> None:
 
 
 def cmd_directions(pid: str) -> None:
-    """Print the transport directions SMS for one patient, without sending it."""
+    """Print the two transport SMS (directions, then help) for one patient, without sending them."""
     p = find_patient(pid)
     print(f"From: {p.get('address') or '(no address)'}")
-    print(transport_directions(p) or "(no directions: the patient has no clinic in clinics.json)")
+    print("SMS 1:", transport_directions(p) or "(no directions: the patient has no clinic in clinics.json)")
+    print("SMS 2:", help_message(p) or "(no help SMS: the clinic has no phone)")
 
 
 def cmd_reset() -> None:

@@ -22,6 +22,7 @@ import db
 import metrics
 import scheduler
 import seed
+import sms
 import templates
 
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
@@ -62,8 +63,10 @@ def send_sms(conn, sender, case_id, to, body, now, advance_to=None):
     'contacted'. Returns True when the message was accepted.
 
     STOP is enforced here, the one path every SMS takes (R5d): nothing goes
-    to the phone of an opted-out patient, whichever feature asked.
+    to the phone of an opted-out patient, whichever feature asked. So is the
+    SMS length limit (sms.fit, SMS_MAX_CHARS).
     """
+    body = sms.fit(body)
     ts = now.isoformat()
     case = db.get_case(conn, case_id)
     if case and case["opted_out"] and to == case["patient_phone"]:
@@ -92,6 +95,11 @@ def _quote(text, limit=QUOTE_MAX):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def _with_quote(make, text):
+    """make(quote) -> SMS. The quote gets whatever room the SMS length limit leaves."""
+    return make(_quote(text, sms.limit() - len(make(""))))
+
+
 def start_referral(conn, send, case, now, data=seed):
     """Create a case and send the first outreach SMS."""
     db.add_case(conn, referred_at=now.isoformat(), **case)
@@ -115,20 +123,24 @@ def _execute(conn, send, case, cls, plan, body, now, data):
     """Apply a core.Plan: log, update the case, send patient/clinic/CHW SMS."""
     ts = now.isoformat()
     cid = case["id"]
-    if cls.label not in ("plan_ack", "unknown"):
-        # Barrier events carry the facility at the time; the radar reads these.
-        db.log_event(conn, cid, ts, "agent", "barrier", barrier=cls.label,
+    if cls.logged_barrier:
+        # Barrier events carry the facility at the time; the radar reads these. A patient
+        # turned away and then rebooked is answered as plan_ack but still logged as turned_away.
+        db.log_event(conn, cid, ts, "agent", "barrier", barrier=cls.logged_barrier,
                      facility_id=case["facility_id"], reason=cls.reason)
-        db.update_case(conn, cid, latest_barrier=cls.label, status="barrier_found")
+        db.update_case(conn, cid, latest_barrier=cls.logged_barrier, status="barrier_found")
     if plan.repoint_to:
         db.update_case(conn, cid, facility_id=plan.repoint_to)
     if plan.set_visit_date:
         db.update_case(conn, cid, visit_date=plan.set_visit_date, status="visit_scheduled")
 
     key, slots = plan.patient
-    sms = templates.render(templates.PATIENT, key, **slots)
+    text = templates.render(templates.PATIENT, key, **slots)
     advance = None if plan.escalate or plan.set_visit_date or cls.label == "plan_ack" else "action_taken"
-    send_sms(conn, send, cid, case["patient_phone"], sms, now, advance_to=advance)
+    send_sms(conn, send, cid, case["patient_phone"], text, now, advance_to=advance)
+    help_text = core.help_sms(plan)
+    if help_text:  # second SMS, the same after every barrier reply
+        send_sms(conn, send, cid, case["patient_phone"], help_text, now)
 
     if plan.clinic:
         fac_id, ckey, cslots = plan.clinic
@@ -173,7 +185,7 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
             return _relay_from_chw(conn, send, chw, body, now)
         if r.kind == "unparsed":
             # Free text from staff is not relayed; tell them the commands instead.
-            send(from_phone, templates.CHW["help"] if role == "chw" else templates.CLINIC_HELP)
+            send(from_phone, sms.fit(templates.CHW["help"] if role == "chw" else templates.CLINIC_HELP))
             return "unparsed"
         if r.kind == "chw_claim":
             case = _pick(conn, "SELECT * FROM cases WHERE escalation != 'none' AND claimed_by_chw IS NULL",
@@ -186,7 +198,7 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
                          " AND status IN ('visit_scheduled', 'follow_up')",
                          (clinic["id"],), r.case_id)
         if case is None:
-            send(from_phone, templates.CHW["which"] if role == "chw" else templates.STAFF_WHICH)
+            send(from_phone, sms.fit(templates.CHW["which"] if role == "chw" else templates.STAFF_WHICH))
             return "which"
         cid = case["id"]
         db.log_event(conn, cid, ts, role, "inbound", body=body, route=r.kind)
@@ -245,18 +257,18 @@ def handle_inbound(conn, send, from_phone, body, now, classify_fn=None, data=see
     elif r.kind == "relay":
         chw_phone = next(c["phone"] for c in data.CHWS if c["id"] == case["claimed_by_chw"])
         db.log_event(conn, cid, ts, "agent", "relayed", to_role="chw")
-        send_sms(conn, send, cid, chw_phone, templates.render(
-            templates.CHW, "from_patient", case_id=cid, quote=_quote(body, templates.RELAY_MAX)), now)
+        send_sms(conn, send, cid, chw_phone, _with_quote(
+            lambda q: templates.render(templates.CHW, "from_patient", case_id=cid, quote=q), body), now)
     elif r.kind in core.REASKS and not may_reask:
         cls = core.Classification("unknown", reason="no_answer")
         plan = core.decide(cls, case, facility, data.FACILITIES, today, data.EMERGENCY)
         _execute(conn, send, case, cls, plan, body, now, data)
     elif r.kind in core.REASKS:
-        sms = templates.render(templates.PATIENT, r.kind, name=facility["name"])
+        text = templates.render(templates.PATIENT, r.kind, name=facility["name"])
         db.log_event(conn, cid, ts, "agent", "reask", template=r.kind)
         awaiting = "barrier_q" if r.kind == "ask_again" else "free_text"
         db.update_case(conn, cid, awaiting=awaiting)
-        send_sms(conn, send, cid, case["patient_phone"], sms, now)
+        send_sms(conn, send, cid, case["patient_phone"], text, now)
     elif r.kind == "ack_visit":
         send_sms(conn, send, cid, case["patient_phone"], templates.render(
             templates.PATIENT, "plan_ack", name=facility["name"], date=case["visit_date"]), now)
@@ -298,11 +310,11 @@ def _relay_from_chw(conn, send, chw, body, now):
     elif len(held) == 1:
         case, text = held[0], body
     else:
-        send(chw["phone"], templates.CHW["many"] if held else templates.CHW["help"])
+        send(chw["phone"], sms.fit(templates.CHW["many"] if held else templates.CHW["help"]))
         return "unparsed"
     cid = case["id"]
     db.log_event(conn, cid, now.isoformat(), "chw", "inbound", body=body, route="relay")
-    send_sms(conn, send, cid, case["patient_phone"], templates.CHW_RELAY + _quote(text, templates.RELAY_MAX), now)
+    send_sms(conn, send, cid, case["patient_phone"], _with_quote(lambda q: templates.CHW_RELAY + q, text), now)
     conn.commit()
     return "relay"
 
@@ -417,7 +429,7 @@ def create_app(auth_token=None, conn=None, sender=None, sim_mode=None,
         )
 
     @app.post("/sms")
-    def sms():
+    def sms_webhook():
         if not signature_ok():
             abort(403)
         handle_inbound(conn, sender, request.form.get("From", ""), request.form.get("Body", ""),

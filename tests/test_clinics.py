@@ -39,3 +39,11 @@ def test_server_finds_clinic_by_column_then_default(monkeypatch):
     assert server.clinic_for({"clinic_id": "FAC-A"})["name"] == "Demo Mto Health Centre"
     assert server.clinic_for({})["id"] == "NY-SINAI"
     assert server.clinic_for({"clinic_id": "NOPE"}) is None
+
+
+def test_every_patient_has_a_known_clinic():
+    import csv
+    from pathlib import Path
+    with open(Path(__file__).parent.parent / "patients.csv", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert rows and all(r["clinic_id"] in clinics.BY_ID for r in rows)

@@ -9,7 +9,6 @@ PATIENT = {
     "transport": "To reach {name}: {transport_note}. Address: {address}.",
     "clinic_hours": "{name} is open {hours}. Reply here if you still can't get seen.",
     "clinic_alternative": "Closed today. Try {alt_name}, {alt_address}. Open {alt_hours}.",
-    "turned_away": "We've told {name} you're coming on {date}.",
     "missing_documents": "For {name} bring: {required_docs}.",
     "scheduling": "Book at {name}: call {phone}, open {hours}.",
     "scheduling_set": "Thanks! We've told {name} you're coming on {date}.",
@@ -41,7 +40,7 @@ CLINIC = {
 }
 
 CHW = {
-    # CHW/supervisor SMS may run to 2 segments (D8); the patient quote is cut to 60.
+    # Every SMS fits SMS_MAX_CHARS (sms.py), CHW ones included; the baton quote is cut to 60.
     "baton": "{kind} {case_id} ({phone}): \"{quote}\". Reply 1 {case_id} to take it.",
     "claimed": "{case_id} is yours. Texts you send here now go to the patient. Reply DONE {case_id} or LOST {case_id} when finished.",
     "from_patient": "{case_id} patient: \"{quote}\"",
@@ -54,14 +53,15 @@ CHW = {
 }
 
 # Prefix on a CHW's own words relayed to the patient (human-written, not a template).
+# Relayed words get whatever room SMS_MAX_CHARS leaves (app._with_quote).
 CHW_RELAY = "Health worker: "
-RELAY_MAX = 300
 
 STAFF_WHICH = "Which case? Reply with the case id, e.g. Y R-0142."
 
-# Closing line of every transport-directions SMS (directions.py), after the routes.
-TRANSPORT_HELP = ("If you need transportation assistance, please call us at {phone} "
-                  "and we'll be happy to help.")
+# Second SMS after every barrier reply, the same for all barriers (core.help_sms),
+# so the first SMS keeps the whole SMS_MAX_CHARS for the personalized answer.
+HELP_SMS = ("If you need more help, please call us at {phone}. Someone here will be happy to help. "
+            "Is there another question we can answer for you?")
 CLINIC_HELP = "Reply Y R-0142 if the patient was seen, N R-0142 if not."
 
 

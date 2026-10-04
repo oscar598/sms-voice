@@ -31,6 +31,6 @@ def load(path=DEFAULT):
     path = Path(path)
     if not path.exists():
         return {}
-    loaded = {k: v for k, v in parse(path.read_text()).items() if v and k not in os.environ}
+    loaded = {k: v for k, v in parse(path.read_text(encoding="utf-8")).items() if v and k not in os.environ}
     os.environ.update(loaded)
     return loaded

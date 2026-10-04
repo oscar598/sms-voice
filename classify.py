@@ -49,7 +49,8 @@ Pick the single best `barrier`:
 - missing_documents: lacks referral letter, ID, insurance card, clinic book or lab results
 - scheduling: can't get or doesn't know the appointment; timing clashes with work
 - clinic_closed: went and the facility was shut
-- turned_away: facility was open but sent them home (queue full, "come back Monday")
+- turned_away: facility was open but sent them home (queue full, "come back Monday"), \
+even if they were given or have chosen a new date - put that date in `return_date`
 - language: didn't understand messages or staff because of language
 - fear_confusion: scared, confused about why they were referred, stigma
 - clinical_symptom: mentions any symptom, pain, bleeding, fever, or feeling worse
@@ -211,6 +212,8 @@ def _cli(argv):
             print("Keyword:   clinical keyword found - the live app skips Claude for this message")
         print(f"Decision:  {s.label or s.route}  (reason: {s.reason})")
         print(f"Patient:   {s.patient_sms or '(no SMS)'}")
+        if s.help_sms:
+            print(f"Patient:   {s.help_sms}")
         if s.clinic_sms:
             print(f"Clinic:    {s.clinic_sms}")
         if s.escalate:

@@ -170,6 +170,12 @@ class Classification:
     fields: dict = field(default_factory=dict)
     urgent: bool = False  # clinical baton timing (5 min/CHW) + safety template
     reason: str = "ok"
+    barrier: str = None  # barrier to log when it differs from label (turned away, then rescheduled)
+
+    @property
+    def logged_barrier(self):
+        """The barrier event to record (the radar reads these); None for plan_ack / unknown."""
+        return self.barrier or (self.label if self.label not in ("plan_ack", "unknown") else None)
 
 
 def _valid_return_date(value, today):
@@ -224,10 +230,16 @@ def apply_guards(raw, today, areas, facility, error=False):
     if conf < CONFIDENCE_FLOOR:
         return Classification("unknown", reason="low_confidence")
     others = {m for m in raw.get("also_mentions") or [] if m in ADMIN_BARRIERS and m != label}
+    if label == "plan_ack" and others == {"turned_away"}:
+        label, others = "turned_away", set()  # "sent me home, but I'll go Monday": one story, not two
     if others:
         return Classification("unknown", reason="multi_barrier")
 
-    return Classification(label, validate_fields(raw.get("fields"), today, areas, facility))
+    fields = validate_fields(raw.get("fields"), today, areas, facility)
+    if label == "turned_away" and "return_date" in fields:
+        # Turned away but already rebooked: answered as plan_ack, still counted on the radar.
+        return Classification("plan_ack", fields, reason="rescheduled", barrier="turned_away")
+    return Classification(label, fields)
 
 
 # ------------------------------------------------------------------ rules
@@ -242,6 +254,7 @@ class Plan:
     repoint_to: str = None
     radar_event: str = None  # facility id the barrier counts against
     reask: bool = False  # asked the patient once more instead of escalating
+    help_phone: str = None  # number in the follow-up help SMS (help_sms); None for re-asks
 
 
 def is_open_on(facility, day):
@@ -274,7 +287,22 @@ def decide(cls, case, facility, facilities, today, emergency, may_reask=False):
 
     may_reask: the previous patient message did not already get a re-ask, so a
     non-urgent "unknown" asks once more before a CHW is brought in.
+    Every answer except a re-ask is followed by the help SMS, with the number of
+    the clinic the patient is now going to.
     """
+    p = _decide(cls, case, facility, facilities, today, emergency, may_reask)
+    if not p.reask:
+        going_to = next((f for f in facilities if f["id"] == p.repoint_to), facility)
+        p.help_phone = going_to.get("phone")
+    return p
+
+
+def help_sms(plan):
+    """The second SMS after a barrier reply (same for every barrier), or None."""
+    return templates.HELP_SMS.format(phone=plan.help_phone) if plan.help_phone else None
+
+
+def _decide(cls, case, facility, facilities, today, emergency, may_reask):
     label, fl = cls.label, cls.fields
     p = Plan()
     base = {**_slots(facility), "service": case["service"]}
@@ -322,11 +350,9 @@ def decide(cls, case, facility, facilities, today, emergency, may_reask=False):
         if "return_date" in fl:
             _visit(p, case, facility, fl["return_date"])
     elif label == "turned_away":
+        # With a new date apply_guards() already made this plan_ack; without one a CHW sorts it out.
         p.radar_event = facility["id"]
-        if "return_date" not in fl:
-            return to_human()
-        p.patient = ("turned_away", {**base, "date": fl["return_date"]})
-        _visit(p, case, facility, fl["return_date"])
+        return to_human()
     elif label == "wrong_facility":
         alt = _alternative(facilities, case["service"], facility["id"], fl.get("area") or case.get("area"))
         if not alt:
@@ -340,6 +366,8 @@ def decide(cls, case, facility, facilities, today, emergency, may_reask=False):
     elif label == "fear_confusion":
         p.patient = ("fear_confusion", base)
     elif label == "plan_ack":
+        if cls.barrier == "turned_away":
+            p.radar_event = facility["id"]  # rescheduled, but the clinic still sent them away
         if "return_date" in fl:
             p.patient = ("plan_ack", {**base, "date": fl["return_date"]})
             _visit(p, case, facility, fl["return_date"])

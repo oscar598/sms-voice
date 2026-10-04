@@ -41,7 +41,8 @@ sms-voice/
 ├── clinics.py              # Loads clinics.json
 ├── seed.py                 # Referral-agent demo data: its clinics, CHW, demo case, 40 history cases
 ├── server.py               # Missed-appointment follow-up over an Android SMS gateway
-├── directions.py           # Google Maps car / transit / bicycle directions for transport replies
+├── directions.py           # Google Maps car / transit / bicycle directions, in one SMS
+├── sms.py                  # The SMS length rule (SMS_MAX_CHARS) every outbound message passes through
 ├── envfile.py              # Loads .env for the command-line entry points
 ├── patients.csv            # server.py's patient list
 ├── web/                    # HTML pages served by app.py
@@ -49,13 +50,13 @@ sms-voice/
 │   ├── referral.html           # New-referral form (/referrals/new)
 │   └── sim.html                # Simulated patient, CHW and clinic phones (/sim)
 ├── eval/
-│   ├── tuning.jsonl            # Labelled messages used to tune the prompt
+│   ├── tuning.jsonl            # The labelled patient messages (eval.py and the scenario report)
 │   ├── heldout.TEMPLATE.jsonl  # Format for the held-out set a teammate writes
 │   └── reports/                # Scenario reports from tests/test_classify.py (gitignored)
 ├── tests/                  # pytest unit tests (no API key or network needed)
 │   ├── test_app.py
 │   ├── test_classify.py        # also: `python tests/test_classify.py` writes a scenario report
-│   ├── classify_scenarios.py   # ~110 scenarios: real hospitals, public places, tricky messages
+│   ├── scenario_context.py     # Hospitals and public places used by the scenario report
 │   ├── test_core.py
 │   ├── test_dashboard.py
 │   ├── test_envfile.py
@@ -203,31 +204,37 @@ python eval.py heldout        # needs eval/heldout.jsonl, written by someone who
 ### Scenario report
 
 ```bash
-python tests/test_classify.py                     # all ~110 scenarios (about 110 Claude calls)
-python tests/test_classify.py --label transport   # one label; also e.g. --label rule:opt_out
+python tests/test_classify.py                                       # all 245 messages (245 Claude calls)
+python tests/test_classify.py --label scheduling,missing_documents  # chosen labels only
 python tests/test_classify.py --limit 10 --workers 4 --no-directions
 ```
 
-The scenario data is in [tests/classify_scenarios.py](tests/classify_scenarios.py):
+The messages come from [eval/tuning.jsonl](eval/tuning.jsonl), the same labelled set `eval.py` scores. Every label has at least 15 messages, deliberately indirect, in English, Swahili, Sheng, Spanish, French and Chinese. There are also edge cases:
+- keyword false positives,
+- prompt injection,
+- sarcasm,
+- a past date,
+- an island location and a missing location.
 
+A row can carry optional context for the report:
+- `hospital`, `place` and `trip`,
+- `note` (why the case is tricky),
+- `also_ok` (other acceptable labels),
+- `lang` and `edge`.
+
+Rows without context get a default Nairobi hospital and place. The hospitals and places are listed in [tests/scenario_context.py](tests/scenario_context.py):
 - **Hospitals:** real hospitals in New York and Nairobi. Their hours, fees and phone numbers are test values.
-- **Patient locations:** public places only, such as parks, museums, restaurants and stations, from nearby to another city. Never homes.
-- **Messages:** deliberately indirect, for every label, plus edge cases:
-  - fixed-rule replies (STOP, bare yes/no/ok),
-  - keyword false positives,
-  - prompt injection, sarcasm, a past date, an island location and a missing location.
+- **Patient locations:** public places only, such as parks, museums, restaurants and stations. Never homes.
 
-Each scenario runs through `eval.simulate()`, the same path as a live SMS. Transport results get real Google Maps directions when `GOOGLE_MAPS_API_KEY` is set.
+Each message runs through `eval.simulate()`, the same path as a live SMS. Transport results get real Google Maps directions when `GOOGLE_MAPS_API_KEY` is set.
 
-The report is written to `eval/reports/classify-<time>.md`; open it with VS Code's Markdown preview. For each scenario it shows:
-- the client, their location and referral,
-- what they wrote,
-- Claude's raw answer,
-- the final decision,
-- the exact SMS sent to the patient and clinic,
-- whether a health worker was brought in.
-
-A `.jsonl` file with the same data is written alongside it.
+The report is a plain-text file, `eval/reports/classify-<time>.txt`. It starts with a summary by label and a list of mismatches. Then, for each message, it shows the back-and-forth:
+1. patient info and location,
+2. our opening SMS,
+3. what the patient wrote,
+4. what it should be classified as,
+5. what it was classified as (with Claude's raw answer),
+6. what we texted back to the patient and the clinic, and whether a health worker was brought in.
 
 ### Configuration
 
@@ -236,6 +243,7 @@ A `.jsonl` file with the same data is written alongside it.
 | `ANTHROPIC_API_KEY` | Claude API key for the classifier |
 | `CLASSIFY_MODEL` | Model ID (default `claude-opus-5-5`) |
 | `CLASSIFY_TIMEOUT` | Classifier timeout in seconds (default 6) |
+| `SMS_MAX_CHARS` | Longest SMS any part of the code may send (default 160, one segment). Enforced in `sms.py` |
 | `TWILIO_AUTH_TOKEN` | Required. Any value in `SIM_MODE` |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_FROM` | Needed for live SMS only |
 | `SIM_MODE` | `1` enables `/sim` and keeps all SMS on screen |
@@ -309,12 +317,18 @@ Claude picks one label from this fixed list. The code, not Claude, then decides 
 | `missing_documents` | Lacks a required document | "i dont have my ID" | Sends the list of documents to bring. A missing referral letter goes to a CHW |
 | `scheduling` | Can't get or doesn't know the appointment | "when can i come? i work all week" | Sends booking instructions. If a date is given, schedules the visit and tells the clinic |
 | `clinic_closed` | Went and it was shut | "went there yesterday the gate was locked" | Sends posted hours, or another clinic if it's closed today. Counts toward the radar |
-| `turned_away` | Open, but sent home | "they told me come back monday" | Tells the clinic the patient is coming on that date. Without a date, goes to a CHW. Counts toward the radar |
+| `turned_away` | Open, but sent home, with no new date | "they told me to come back when the machine is fixed" | Goes to a CHW. Counts toward the radar. With a new date it becomes `plan_ack` (next row) |
 | `language` | Didn't understand the language | "sielewi kiingereza, naomba kiswahili" | Resends in Swahili. Other languages go to a CHW |
 | `fear_confusion` | Scared or unsure why they were referred | "why do i need to go, is it serious?" | Sends a plain explanation of the referral |
 | `clinical_symptom` | Mentions any symptom or feeling worse | "my stomach has felt really strange" | Sends safety instructions with the emergency facility and number. Pages a CHW urgently |
-| `plan_ack` | No barrier, just a plan or thanks | "ok i can go monday" | Thanks the patient. If a date is given, schedules the visit and tells the clinic |
+| `plan_ack` | No barrier left, just a plan or thanks, including "turned away but rebooked" | "ok i can go monday", "they sent me home, come back friday" | Thanks the patient. If a date is given, schedules the visit and tells the clinic. If they were turned away first, it still counts toward the radar |
 | `unknown` | Unclear, off-topic or several barriers | "hmm maybe" | Asks once more, then hands to a CHW |
+
+Every answer above (not the "asks once more" question) is followed by a second SMS, the same for every barrier, so the first SMS can use all of `SMS_MAX_CHARS` for the personalized reply:
+
+> If you need more help, please call us at {clinic phone}. Someone here will be happy to help. Is there another question we can answer for you?
+
+In `server.py` the transport reply is the Google Maps SMS (clinic address, car, bus, and bike if it's an hour or less), and the help SMS is sent once per conversation.
 
 Safety rules applied after Claude answers:
 

@@ -1,11 +1,11 @@
-patient_id,name,phone,address,appointment_datetime,attended,miss_reason,wants_reschedule,needs_followup,opted_out,last_reply
-P99998,Angel Li,+001-786-395-6618,"2180 1st Ave, New York, NY 10029",2026-10-01 14:30,False,illness,,False,False,I'm not feeling well
-P00007,Wei Garcia,+000-555-979-1907,"32 Karen Road, Karen, Nairobi 00502",2026-10-07 13:30,False,,,False,False,
-P00009,Wei Lopez,+000-555-514-2182,"86 Karen Road, Karen, Nairobi 00502",2026-10-08 16:00,False,,,False,False,
-P00001,Samuel Diallo,+000-555-640-8721,"48 Plains Road, South B, Nairobi 00200",2026-10-15 09:30,False,,,False,False,
-P00005,Mei Kamau,+000-555-995-1927,"67 Limuru Road, Parklands, Nairobi 00623",2026-10-16 08:30,False,,,False,False,
-P00002,Fatima Haddad,+000-555-884-0735,"97 Bogani Road, Karen, Nairobi 00502",2026-10-20 12:00,False,,,False,False,
-P00004,Sarah Haddad,+000-555-714-3035,"88 Bogani Road, Karen, Nairobi 00502",2026-10-22 12:00,False,,,False,False,
-P00006,Nadia Achieng,+000-555-589-5344,"118 Thika Road, Kasarani, Nairobi 00618",2026-10-22 15:30,False,,,False,False,
-P00008,Grace Banda,+000-555-819-8955,"62 Argwings Kodhek Road, Kilimani, Nairobi 00100",2026-10-28 13:30,False,,,False,False,
-P00003,Daniel Garcia,+000-555-430-2277,"22 Ragati Road, Upper Hill, Nairobi 00100",2026-10-29 16:00,False,,,False,False,
+patient_id,name,phone,address,clinic_id,appointment_datetime,attended,miss_reason,wants_reschedule,needs_followup,opted_out,last_reply
+P99998,Angel Li,+001-786-395-6618,"2180 1st Ave, New York, NY 10029",NY-SINAI,2026-10-01 14:30,False,cost,False,True,False,no
+P00007,Wei Garcia,+000-555-979-1907,"32 Karen Road, Karen, Nairobi 00502",FAC-D,2026-10-07 13:30,False,,,False,False,
+P00009,Wei Lopez,+000-555-514-2182,"86 Karen Road, Karen, Nairobi 00502",FAC-D,2026-10-08 16:00,False,,,False,False,
+P00001,Samuel Diallo,+000-555-640-8721,"48 Plains Road, South B, Nairobi 00200",FAC-B,2026-10-15 09:30,False,,,False,False,
+P00005,Mei Kamau,+000-555-995-1927,"67 Limuru Road, Parklands, Nairobi 00623",FAC-C,2026-10-16 08:30,False,,,False,False,
+P00002,Fatima Haddad,+000-555-884-0735,"97 Bogani Road, Karen, Nairobi 00502",FAC-D,2026-10-20 12:00,False,,,False,False,
+P00004,Sarah Haddad,+000-555-714-3035,"88 Bogani Road, Karen, Nairobi 00502",FAC-D,2026-10-22 12:00,False,,,False,False,
+P00006,Nadia Achieng,+000-555-589-5344,"118 Thika Road, Kasarani, Nairobi 00618",FAC-A,2026-10-22 15:30,False,,,False,False,
+P00008,Grace Banda,+000-555-819-8955,"62 Argwings Kodhek Road, Kilimani, Nairobi 00100",FAC-D,2026-10-28 13:30,False,,,False,False,
+P00003,Daniel Garcia,+000-555-430-2277,"22 Ragati Road, Upper Hill, Nairobi 00100",FAC-D,2026-10-29 16:00,False,,,False,False,

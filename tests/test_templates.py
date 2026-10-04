@@ -1,7 +1,7 @@
-"""SMS length budget (D8 / R7d), rendered with the real seed data.
+"""SMS length budget, rendered with the real seed data.
 
-Patient SMS: one GSM-7 segment under the Twilio trial prefix (<= 120 chars).
-Clinic SMS: one segment (<= 160). CHW SMS: up to two segments (<= 306).
+Every SMS: at most SMS_MAX_CHARS (sms.limit(), 160 by default). Patient SMS are
+held to 120 so they still fit one segment under the Twilio trial prefix.
 A single non-GSM-7 character switches the whole SMS to UCS-2 (70 chars per
 segment), so every template must render in the GSM-7 basic alphabet.
 """
@@ -11,14 +11,13 @@ import itertools
 import pytest
 
 import seed
+import sms
 import templates
 from app import QUOTE_MAX, _quote
 
-GSM7 = set(
-    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
-    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
-)
-PATIENT_MAX, CLINIC_MAX, CHW_MAX = 120, 160, 306
+GSM7 = sms.GSM7
+PATIENT_MAX = min(120, sms.limit())
+CLINIC_MAX = CHW_MAX = sms.limit()
 DATE = "2026-10-12"
 
 

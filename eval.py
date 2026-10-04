@@ -4,7 +4,7 @@ Runs each message through the real decision path - clinical keyword filter,
 then Claude, then guards, then the rules table - and compares the resulting
 label and action with the gold label.
 
-    .venv/bin/python eval.py tuning            # the 100 messages we tune on
+    .venv/bin/python eval.py tuning            # the messages we tune on (also the scenario report's input)
     .venv/bin/python eval.py heldout           # the 50 a teammate wrote (headline numbers)
     .venv/bin/python eval.py tuning --limit 10
 
@@ -25,6 +25,7 @@ import classify
 import core
 import envfile
 import seed
+import sms
 import templates
 
 EVAL_DIR = Path(__file__).parent / "eval"
@@ -62,7 +63,7 @@ def load(name):
         sys.exit(f"{path} not found. The held-out set is written by a teammate who does not tune "
                  f"the prompt (D11); see eval/heldout.TEMPLATE.jsonl for the format.")
     rows = []
-    for n, line in enumerate(path.read_text().splitlines(), 1):
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
         try:
@@ -99,6 +100,7 @@ class Simulation:
     error: str = None           # why Claude failed, when it did
     template: str = None        # patient template key
     patient_sms: str = None
+    help_sms: str = None        # second patient SMS after a barrier reply (core.help_sms)
     clinic_sms: str = None
     escalate: str = None        # None | clinical | non_clinical
     latency_s: float = None
@@ -147,6 +149,7 @@ def simulate(text, case, facility, today, classify_fn, facilities=None, emergenc
                                              date=case.get("visit_date"))
         elif kind == "no":
             s.template, s.patient_sms = "what_happened", templates.PATIENT["what_happened"]
+        s.patient_sms = s.patient_sms and sms.fit(s.patient_sms)  # exactly what would be sent
         return s
 
     s = Simulation(kind, "keyword" if kind == "clinical" else "model")
@@ -170,9 +173,11 @@ def simulate(text, case, facility, today, classify_fn, facilities=None, emergenc
     s.patient_sms = core.render_plan(plan)
     if s.template == "transport" and directions_fn:
         s.patient_sms = directions_fn() or s.patient_sms
+    s.patient_sms = sms.fit(s.patient_sms)  # exactly what would be sent
+    s.help_sms = core.help_sms(plan) and sms.fit(core.help_sms(plan))
     if plan.clinic:
         _, key, slots = plan.clinic
-        s.clinic_sms = templates.render(templates.CLINIC, key, **slots)
+        s.clinic_sms = sms.fit(templates.render(templates.CLINIC, key, **slots))
     return s
 
 
@@ -262,7 +267,7 @@ def main(argv=None):
     print(file=sys.stderr)
 
     out = EVAL_DIR / f"results-{args.set}-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
-    with out.open("w") as f:
+    with out.open("w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps({**asdict(r), "wrong_action": r.wrong_action}, ensure_ascii=False) + "\n")
     print_report(args.set, summarize(results, classify.timeout_s()))

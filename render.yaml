@@ -26,6 +26,8 @@ services:
         value: /var/data/sim.db
       - key: CLASSIFY_TIMEOUT
         value: "6"
+      - key: SMS_MAX_CHARS
+        value: "160"         # longest SMS any part of the code may send (sms.py)
       - key: REQUIRE_SIM_PASSWORD
         value: "1"           # refuse to start with an open /sim
       # Secrets: entered in the Render dashboard, never committed.

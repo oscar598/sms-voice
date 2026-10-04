@@ -5,12 +5,14 @@ from twilio.request_validator import RequestValidator
 
 import db
 import seed
+import templates
 from app import create_app
 
 TOKEN = "test-auth-token"
 NOW = datetime(2026, 10, 5, 9, 0)  # Monday; FAC-B is open
 PATIENT, CHW, CLINIC = seed.DEMO_PATIENT_PHONE, seed.CHWS[0]["phone"], seed.FACILITY_BY_ID["FAC-B"]["phone"]
 NEXT_MON = "2026-10-12"
+HELP = templates.HELP_SMS.format(phone=CLINIC)  # second SMS after every barrier reply
 
 # Stand-in for the model: message -> labelled output (the real call is classify.py).
 MODEL = {
@@ -48,6 +50,21 @@ def outbox(client, phone):
     return [m["body"] for m in msgs if m["dir"] == "out" and m["phone"] == phone]
 
 
+def test_turned_away_then_rebooked_gets_plan_ack_reply_and_counts_on_radar():
+    text = "they sent me home, said come back monday"
+    client, conn = make(lambda t, today=None: {
+        "barrier": "turned_away", "confidence": 0.9, "clinical_flag": False, "fields": {"return_date": NEXT_MON}})
+    client.post("/sim/referral")
+    sim(client, PATIENT, text)
+
+    assert outbox(client, PATIENT)[-2:] == [f"Thanks! See you at Demo Baraka Clinic on {NEXT_MON}.", HELP]
+    assert outbox(client, CLINIC)[-1].startswith(f"R-0142 arriving {NEXT_MON}")
+    case = db.get_case(conn, "R-0142")
+    assert (case["status"], case["visit_date"], case["escalation"]) == ("visit_scheduled", NEXT_MON, "none")
+    barrier = [e for e in db.events(conn, "R-0142") if e["kind"] == "barrier"]
+    assert [(e["barrier"], e["facility_id"]) for e in barrier] == [("turned_away", "FAC-B")]
+
+
 def test_demo_journey_end_to_end():
     client, conn = make()
     client.post("/sim/referral")
@@ -56,7 +73,8 @@ def test_demo_journey_end_to_end():
 
     # 1. clinic closed (FAC-B open today per posted hours -> hours, radar event)
     assert sim(client, PATIENT, "went there yesterday the gate was locked, nobody there") == "classify"
-    assert "Demo Baraka Clinic is open Mon-Fri 8-4" in outbox(client, PATIENT)[-1]
+    assert "Demo Baraka Clinic is open Mon-Fri 8-4" in outbox(client, PATIENT)[-2]
+    assert outbox(client, PATIENT)[-1] == HELP
     barrier = [e for e in db.events(conn, "R-0142") if e["kind"] == "barrier"]
     assert [(e["barrier"], e["facility_id"]) for e in barrier] == [("clinic_closed", "FAC-B")]
 
@@ -68,7 +86,7 @@ def test_demo_journey_end_to_end():
 
     # 3. symptom -> keyword path, safety SMS, CHW baton; model never called
     assert sim(client, PATIENT, "also my stomach still really hurting") == "clinical"
-    assert "A health worker will contact you now" in outbox(client, PATIENT)[-1]
+    assert "A health worker will contact you now" in outbox(client, PATIENT)[-2]
     assert outbox(client, CHW)[-1].startswith("CLINICAL R-0142")
     assert db.get_case(conn, "R-0142")["escalation"] == "clinical"
 
@@ -120,7 +138,7 @@ def test_classifier_outage_routes_free_text_to_urgent_chw():
     case = db.get_case(conn, "R-0142")
     assert case["escalation"] == "clinical"  # D6: outage uses clinical timing
     assert [e["kind"] for e in db.events(conn, "R-0142")].count("model_error") == 1
-    assert outbox(client, PATIENT)[-1] == "Thanks, a health worker will follow up."
+    assert outbox(client, PATIENT)[-2:] == ["Thanks, a health worker will follow up.", HELP]
 
 
 def test_stop_silences_everything_until_start():

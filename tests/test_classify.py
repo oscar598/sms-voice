@@ -1,8 +1,12 @@
 """classify.py unit tests, plus a scenario report generator.
 
+The scenarios are the labelled messages in eval/tuning.jsonl (the set eval.py
+scores), each given a patient, a real hospital and a public place as location.
+
     pytest                                  # unit tests only (no API calls)
-    python tests/test_classify.py           # run every scenario through Claude -> eval/reports/
-    python tests/test_classify.py --label transport --limit 5 --workers 4 --no-directions
+    python tests/test_classify.py           # every tuning message through Claude -> eval/reports/*.txt
+    python tests/test_classify.py --label scheduling
+    python tests/test_classify.py --label missing_documents --limit 5 --workers 4 --no-directions
 """
 
 import json
@@ -21,7 +25,8 @@ import pytest  # noqa: E402
 
 import classify  # noqa: E402
 import core  # noqa: E402
-from classify_scenarios import EMERGENCY, HOSPITALS, NAMES, PLACES, SCENARIOS  # noqa: E402
+import eval as ev  # noqa: E402
+from scenario_context import DEFAULT_CONTEXT, EMERGENCY, HOSPITALS, NAMES, PLACES  # noqa: E402
 
 TODAY = date(2026, 10, 5)
 GOOD = {"barrier": "plan_ack", "confidence": 0.92, "clinical_flag": False, "also_mentions": [],
@@ -112,6 +117,23 @@ ALLOWED_PLACE_KINDS = {"park", "museum", "landmark", "restaurant", "station", "s
                        "amusement park", "airport", "island landmark", "market", "mall"}
 
 
+def load_scenarios():
+    """tuning.jsonl rows with their report context filled in (DEFAULT_CONTEXT when absent)."""
+    out = []
+    for i, row in enumerate(ev.load("tuning")):
+        hosp, place, trip = DEFAULT_CONTEXT[i % len(DEFAULT_CONTEXT)]
+        if "hospital" in row:
+            hosp, place, trip = row["hospital"], row.get("place"), row.get("trip", "-")
+        out.append({"expect": row["label"], "text": row["text"], "fields": row.get("fields", {}),
+                    "hospital": hosp, "place": place, "trip": trip, "note": row.get("note", ""),
+                    "also_ok": row.get("also_ok", []), "lang": row.get("lang", "-"),
+                    "edge": row.get("edge", False)})
+    return out
+
+
+SCENARIOS = load_scenarios()
+
+
 def scenario_ids():
     counts, ids = {}, []
     for sc in SCENARIOS:
@@ -141,8 +163,6 @@ def build(i, sc):
 
 def run_scenario(i, sc, today, classify_fn, use_directions):
     import directions
-    import eval as ev
-    import templates
 
     patient, case, hosp, city, emergency = build(i, sc)
 
@@ -150,98 +170,106 @@ def run_scenario(i, sc, today, classify_fn, use_directions):
         if not (use_directions and patient["location"]):
             return None
         return directions.transport_sms(
-            patient["location"]["address"], hosp["name"], hosp["address"], log=lambda *_: None,
-            footer=templates.TRANSPORT_HELP.format(phone=hosp["phone"]))
+            patient["location"]["address"], hosp["name"], hosp["address"], log=lambda *_: None)
 
     s = ev.simulate(sc["text"], case, hosp, today, classify_fn, facilities=city, emergency=emergency,
                     open_prompt="barrier_q", always_call_model=True, directions_fn=directions_sms)
     got = f"rule:{s.route}" if s.source == "rule" else s.label
-    verdict = "match" if got == sc["expect"] else "acceptable" if got in sc["also_ok"] else "different"
+    verdict = ("rule" if s.source == "rule" else "match" if got == sc["expect"]
+               else "acceptable" if got in sc["also_ok"] else "different")
     return {"scenario": sc, "patient": patient, "hospital": hosp, "sim": s, "got": got, "verdict": verdict}
 
 
-MARK = {"match": "✅", "acceptable": "🟡", "different": "❌"}
+# "rule": a bare reply (e.g. "ok") answered by code before Claude is asked.
+VERDICT = {"match": "OK", "acceptable": "ALSO OK", "different": "MISMATCH", "rule": "FIXED RULE"}
+HANDLED = {"model": "Claude, then the safety checks",
+           "model_error": "Claude failed, so a health worker takes over",
+           "keyword": "clinical keyword (the live app skips Claude here)",
+           "rule": "fixed rule, no Claude"}
+RULE = "=" * 88
 
 
-def _md(text):
-    return (text or "").replace("|", "\\|").replace("\n", "<br>")
+def _said(who, text):
+    """'US       > first line' with following lines indented under the text."""
+    lines = (text or "(nothing sent)").split("\n")
+    pad = " " * 11
+    return [f"{who:<8} > {lines[0]}"] + [f"{pad}{line}" for line in lines[1:]]
+
+
+def _claude_line(s):
+    if s.error:
+        return f"Claude failed: {s.error}"
+    if s.raw is None:
+        return "Claude not asked"
+    extra = []
+    if s.raw.get("clinical_flag"):
+        extra.append("clinical_flag")
+    if s.raw.get("also_mentions"):
+        extra.append("also mentions " + ", ".join(s.raw["also_mentions"]))
+    if s.raw.get("fields"):
+        extra.append("fields " + json.dumps(s.raw["fields"], ensure_ascii=False))
+    return (f"Claude said {s.raw.get('barrier')}, confidence {s.raw.get('confidence')}"
+            + (f" ({'; '.join(extra)})" if extra else "") + (f", {s.latency_s:.1f}s" if s.latency_s else ""))
 
 
 def write_report(rows, ids, today, model_name, use_directions, out_dir=REPORT_DIR):
-    """Markdown report (read it in VS Code's preview) + one JSON line per scenario."""
+    """Plain-text report: one back-and-forth per scenario, summary first."""
     from collections import Counter
-    from dataclasses import asdict
     from datetime import datetime
 
+    import templates
+
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    md_path, jsonl_path = out_dir / f"classify-{stamp}.md", out_dir / f"classify-{stamp}.jsonl"
+    path = out_dir / f"classify-{datetime.now():%Y%m%d-%H%M%S}.txt"
     verdicts = Counter(r["verdict"] for r in rows)
     sources = Counter(r["sim"].source for r in rows)
     lat = sorted(r["sim"].latency_s for r in rows if r["sim"].latency_s is not None)
-    tokens = [sum(r["sim"].usage.get(k, 0) for r in rows) for k in ("input_tokens", "output_tokens")]
 
-    L = [f"# Classifier scenario report ({today:%a %Y-%m-%d})", "",
-         f"Model `{model_name}` · {len(rows)} scenarios · directions "
-         f"{'on (Google Maps)' if use_directions else 'off'} · generated {datetime.now():%H:%M}", "",
-         "Hospital names and addresses are real; their hours, fees, documents and phone numbers are "
+    L = [f"CLASSIFIER SCENARIO REPORT - {today:%a %Y-%m-%d}",
+         f"Model {model_name} | {len(rows)} scenarios | directions "
+         f"{'on (Google Maps)' if use_directions else 'off'} | generated {datetime.now():%H:%M}",
+         "Hospital names and addresses are real; their hours, fees, documents and phone numbers are",
          "test values. Patient locations are public places, never homes. Names are fictional.", "",
-         "**Verdicts:** " + " · ".join(f"{MARK[v]} {v} {verdicts.get(v, 0)}" for v in MARK),
-         f"**How each message was handled:** sent to Claude {sources.get('model', 0)} · clinical keyword "
-         f"{sources.get('keyword', 0)} · fixed rule {sources.get('rule', 0)} · Claude failed "
-         f"{sources.get('model_error', 0)}",
-         f"**Claude latency:** median {lat[len(lat) // 2]:.1f}s, max {lat[-1]:.1f}s · tokens in {tokens[0]}, "
-         f"out {tokens[1]}" if lat else "**Claude latency:** no calls", ""]
-
-    L += ["## By expected label", "", "| Expected | Scenarios | ✅ | 🟡 | ❌ |", "|---|---|---|---|---|"]
+         "RESULT     " + " | ".join(f"{VERDICT[v]} {verdicts.get(v, 0)}" for v in VERDICT),
+         f"HANDLED BY Claude {sources.get('model', 0)} | clinical keyword {sources.get('keyword', 0)} | "
+         f"fixed rule {sources.get('rule', 0)} | Claude failed {sources.get('model_error', 0)}"]
+    if lat:
+        L.append(f"LATENCY    median {lat[len(lat) // 2]:.1f}s, max {lat[-1]:.1f}s")
+    L += ["", "BY EXPECTED LABEL"]
     for exp in sorted({r["scenario"]["expect"] for r in rows}, key=lambda e: (e.startswith("rule"), e)):
-        group = [r for r in rows if r["scenario"]["expect"] == exp]
-        c = Counter(r["verdict"] for r in group)
-        L.append(f"| `{exp}` | {len(group)} | {c['match']} | {c['acceptable']} | {c['different']} |")
+        c = Counter(r["verdict"] for r in rows if r["scenario"]["expect"] == exp)
+        L.append(f"  {exp:<20} {sum(c.values()):>3} scenarios   OK {c['match']:>2}   "
+                 f"ALSO OK {c['acceptable']:>2}   MISMATCH {c['different']:>2}")
+    misses = [(sid, r) for sid, r in zip(ids, rows) if r["verdict"] == "different"]
+    if misses:
+        L += ["", "MISMATCHES"] + [f"  {sid:<9} should be {r['scenario']['expect']}, got {r['got']}: "
+                                   f"\"{r['scenario']['text']}\"" for sid, r in misses]
 
-    L += ["", "## All scenarios", "", "| ID | Patient | Location | Message | Expected | Got | |",
-          "|---|---|---|---|---|---|---|"]
-    for sid, r in zip(ids, rows):
-        loc = r["patient"]["location"]
-        L.append(f"| [{sid}](#{sid.lower()}) | {_md(r['patient']['name'])} | "
-                 f"{_md(loc['name']) if loc else '(none)'} ({r['patient']['trip']}) | {_md(r['scenario']['text'])} | "
-                 f"`{r['scenario']['expect']}` | `{r['got']}` | {MARK[r['verdict']]} |")
-
-    L += ["", "## Details", ""]
     for sid, r in zip(ids, rows):
         sc, p, h, s = r["scenario"], r["patient"], r["hospital"], r["sim"]
         loc = p["location"]
-        L += [f"### {sid}", "",
-              f"{MARK[r['verdict']]} expected `{sc['expect']}`, got `{r['got']}`"
-              + (f" (also acceptable: {', '.join(sc['also_ok'])})" if sc["also_ok"] else ""), "",
-              f"- **Client:** {p['name']} ({p['patient_id']}) · {p['phone']} · language `{p['language']}`",
-              f"- **Referral:** {p['service']} at {h['name']}, {h['address']}",
-              f"- **Location:** " + (f"{loc['name']} ({loc['kind']}), {loc['address']} · trip: {p['trip']}"
-                                     if loc else "not on file"),
-              f"- **Why this case:** {sc['note'] or '-'}", "",
-              f"**Patient wrote:** {sc['text']}", ""]
-        if s.raw is not None:
-            L.append(f"**Claude's answer** ({s.latency_s:.1f}s): `{json.dumps(s.raw, ensure_ascii=False)}`")
-        elif s.error:
-            L.append(f"**Claude failed:** {s.error}")
-        handled = {"model": "Claude's label, after the safety checks",
-                   "model_error": "Claude failed, so it goes to a health worker",
-                   "keyword": "clinical keyword - the live app skips Claude here",
-                   "rule": "fixed rule, no Claude"}[s.source]
-        L += ["", f"**Decision:** `{r['got']}` - {handled} (reason: {s.reason})", "",
-              "**Patient SMS:**", "", "> " + (s.patient_sms or "(nothing sent)").replace("\n", "  \n> "), ""]
+        intro = templates.render(templates.PATIENT, "intro", name=h["name"], service=p["service"])
+        L += ["", RULE, f"{sid:<12}{'[' + VERDICT[r['verdict']] + ']':>76}", RULE,
+              f"PATIENT     {p['name']} ({p['patient_id']}) | {p['phone']} | language: {p['language']}",
+              f"REFERRED    {p['service']} at {h['name']}, {h['address']}",
+              "LOCATION    " + (f"{loc['name']} ({loc['kind']}), {loc['address']} | trip: {p['trip']}"
+                                if loc else "not on file"),
+              f"WHY         {sc['note'] or '-'}", ""]
+        L += _said("US", intro) + _said("PATIENT", sc["text"]) + [""]
+        L += [f"SHOULD BE       {sc['expect']}"
+              + (f"   (also acceptable: {', '.join(sc['also_ok'])})" if sc["also_ok"] else ""),
+              f"CLASSIFIED AS   {r['got']}   via {HANDLED[s.source]} | reason: {s.reason}",
+              f"                {_claude_line(s)}", ""]
+        L += _said("US", s.patient_sms)
+        if s.help_sms:
+            L += _said("US", s.help_sms)
         if s.clinic_sms:
-            L += [f"**Clinic SMS:** {s.clinic_sms}", ""]
+            L += _said("CLINIC", s.clinic_sms)
         if s.escalate:
-            L += [f"**Health worker:** case handed over ({s.escalate.replace('_', '-')})", ""]
+            L.append(f"HEALTH WORKER  case handed over ({s.escalate.replace('_', '-')})")
 
-    md_path.write_text("\n".join(L), encoding="utf-8")
-    with jsonl_path.open("w", encoding="utf-8") as f:
-        for sid, r in zip(ids, rows):
-            f.write(json.dumps({"id": sid, "verdict": r["verdict"], "got": r["got"], **r["scenario"],
-                                "patient": r["patient"], "hospital": r["hospital"]["name"],
-                                "result": asdict(r["sim"])}, ensure_ascii=False) + "\n")
-    return md_path, jsonl_path
+    path.write_text("\n".join(L) + "\n", encoding="utf-8")
+    return path
 
 
 # ---- offline checks on the scenario data and the report (run by pytest)
@@ -249,12 +277,11 @@ def write_report(rows, ids, today, model_name, use_directions, out_dir=REPORT_DI
 
 def test_scenarios_cover_every_label_with_several_cases():
     for label in core.LABELS:
-        assert sum(sc["expect"] == label for sc in SCENARIOS) >= 5, label
+        assert sum(sc["expect"] == label for sc in SCENARIOS) >= 10, label
 
 
 def test_scenarios_are_well_formed():
-    for sc in SCENARIOS:
-        assert sc["expect"] in core.LABELS or sc["expect"].startswith("rule:"), sc
+    for sc in SCENARIOS:  # labels themselves are checked by eval.load()
         assert set(sc["also_ok"]) <= set(core.LABELS), sc
         assert sc["hospital"] in HOSPITALS and (sc["place"] is None or sc["place"] in PLACES), sc
     for h in HOSPITALS.values():  # Claude may only name documents in classify.DOCS
@@ -266,21 +293,23 @@ def test_locations_are_public_places_not_homes():
 
 
 def test_report_builds_offline(tmp_path):
-    """Every scenario through the real pipeline with Claude replaced by its expected label."""
+    """Every scenario through the real pipeline, with Claude replaced by the gold label and fields."""
+    by_text = {sc["text"]: sc for sc in SCENARIOS}
+
     def fake(text, today, meta):
-        sc = next(s for s in SCENARIOS if s["text"] == text)
-        label = sc["expect"] if sc["expect"] in core.LABELS else "unknown"
-        return {"barrier": label, "confidence": 0.9, "clinical_flag": label == "clinical_symptom",
-                "also_mentions": [], "fields": {}}
+        sc = by_text[text]
+        return {"barrier": sc["expect"], "confidence": 0.9, "clinical_flag": sc["expect"] == "clinical_symptom",
+                "also_mentions": [], "fields": sc["fields"]}
 
     rows = [run_scenario(i, sc, TODAY, fake, use_directions=False) for i, sc in enumerate(SCENARIOS)]
-    assert all(r["sim"].patient_sms or r["got"] == "rule:opt_out" for r in rows)
-    assert {r["got"] for r in rows if r["scenario"]["expect"].startswith("rule:")} == {
-        sc["expect"] for sc in SCENARIOS if sc["expect"].startswith("rule:")}
-    md, jsonl = write_report(rows, scenario_ids(), TODAY, "fake", False, out_dir=tmp_path)
-    text = md.read_text(encoding="utf-8")
-    assert all(f"### {sid}" in text for sid in scenario_ids())
-    assert len(jsonl.read_text(encoding="utf-8").splitlines()) == len(SCENARIOS)
+    assert all(r["sim"].patient_sms for r in rows)
+    assert all(r["verdict"] in ("match", "rule") for r in rows)  # gold in -> gold out
+    path = write_report(rows, scenario_ids(), TODAY, "fake", False, out_dir=tmp_path)
+    assert path.suffix == ".txt"
+    text = path.read_text(encoding="utf-8")
+    for sid, sc in zip(scenario_ids(), SCENARIOS):  # each case: header, what they said, what should be
+        assert f"\n{sid} " in text and sc["text"].split("\n")[0][:40] in text
+    assert text.count("SHOULD BE ") == text.count("CLASSIFIED AS ") == len(SCENARIOS)
 
 
 # ---- python tests/test_classify.py
@@ -294,7 +323,8 @@ def main(argv=None):
     import eval as ev
 
     ap = argparse.ArgumentParser(description="Run the classifier scenarios through Claude and write a report.")
-    ap.add_argument("--label", help="only scenarios expecting this label (e.g. transport, rule:opt_out)")
+    ap.add_argument("--label", help="only scenarios expecting these labels, comma-separated "
+                                    "(e.g. scheduling,missing_documents or rule:opt_out)")
     ap.add_argument("--limit", type=int, help="run at most N scenarios")
     ap.add_argument("--workers", type=int, default=6, help="parallel Claude calls (default 6)")
     ap.add_argument("--no-directions", action="store_true", help="skip Google Maps for transport replies")
@@ -307,8 +337,9 @@ def main(argv=None):
         sys.exit("ANTHROPIC_API_KEY is not set. Add it to .env or your shell.")
     use_directions = not args.no_directions and bool(os.environ.get("GOOGLE_MAPS_API_KEY"))
 
+    labels = {x.strip() for x in args.label.split(",")} if args.label else None
     picked = [(i, sid, sc) for i, (sid, sc) in enumerate(zip(scenario_ids(), SCENARIOS))
-              if not args.label or sc["expect"] == args.label][: args.limit]
+              if not labels or sc["expect"] in labels][: args.limit]
     if not picked:
         sys.exit(f"no scenarios for --label {args.label}")
     today, fn = date.today(), ev.classifier_fn()
@@ -317,13 +348,13 @@ def main(argv=None):
     def one(item):
         i, sid, sc = item
         r = run_scenario(i, sc, today, fn, use_directions)
-        print(f"  {MARK[r['verdict']]} {sid:8} {sc['expect']:18} -> {r['got']}")
+        print(f"  {VERDICT[r['verdict']]:<8} {sid:9} {sc['expect']:18} -> {r['got']}")
         return r
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         rows = list(pool.map(one, picked))
-    md, jsonl = write_report(rows, [sid for _, sid, _ in picked], today, classify.model(), use_directions)
-    print(f"\nReport: {md}\nData:   {jsonl}")
+    path = write_report(rows, [sid for _, sid, _ in picked], today, classify.model(), use_directions)
+    print(f"\nReport: {path}")
 
 
 if __name__ == "__main__":
