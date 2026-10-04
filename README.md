@@ -1,10 +1,6 @@
 # SMS Voice: referral closure agent
 
-<<<<<<< HEAD
 ## The problem
-=======
-A referral gets written, and then often nothing happens. A number of outpatient specialty referrals are never completed, and nobody owns the gap between "referred" and "seen".
->>>>>>> 1c3952825c42f2264f75e952427b81bb469c0f2f
 
 A health worker refers a patient to a clinic, and then often nothing happens. The patient runs into a barrier: no fare for the matatu, a missing document, a locked gate, a front desk that sends them home. Nobody finds out which barrier it was. The community health worker (CHW) who made the referral usually never learns whether the patient arrived. Nobody owns the gap between "referred" and "seen".
 
@@ -42,7 +38,8 @@ sms-voice/
 ├── metrics.py              # Dashboard numbers and the clinic reliability radar
 ├── seed.py                 # Synthetic Nairobi clinics, CHW and 40 demo cases
 ├── eval.py                 # Classifier evaluation against labelled messages
-├── envfile.py              # Loads .env for app.py and eval.py
+├── try_claude.py           # Send one message to Claude from the command line, print the decision
+├── envfile.py              # Loads .env for app.py, eval.py and try_claude.py
 ├── home.html               # Landing page (/)
 ├── referral.html           # New-referral form (/referrals/new)
 ├── sim.html                # Simulated patient, CHW and clinic phones (/sim)
@@ -136,22 +133,18 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in the project root. It is gitignored:
+Set up the `.env` file in the project root. It is gitignored. If yours has none, create one; the variables it needs are in the Configuration table below. The local `.env` already sets simulator mode, port 5055 and `sim.db`. You only need to fill in:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Start the app in simulator mode:
+`.env` is read by `python app.py`, `python eval.py` and `python try_claude.py`. Tests never read it. Variables already set in your shell take priority over the file.
+
+Start the app:
 
 ```bash
-# macOS / Linux / Git Bash
-SIM_MODE=1 TWILIO_AUTH_TOKEN=sim-only DB_PATH=sim.db PORT=5055 python app.py
-```
-
-```powershell
-# Windows PowerShell
-$env:SIM_MODE="1"; $env:TWILIO_AUTH_TOKEN="sim-only"; $env:DB_PATH="sim.db"; $env:PORT="5055"; python app.py
+python app.py
 ```
 
 Then open:
@@ -169,6 +162,27 @@ To fill the dashboard with the 40 synthetic demo cases, stop the app and run `py
 1. Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and `TWILIO_FROM`, and leave `SIM_MODE` unset.
 2. Point the Twilio number's messaging webhook at `https://<public-host>/sms`.
 3. Note that requests without a valid `X-Twilio-Signature` are rejected with 403, and that trial accounts can only text verified numbers.
+
+### Test Claude from the command line
+
+[try_claude.py](try_claude.py) sends one patient message to Claude and prints what the agent would do. It uses demo case R-0142 and does not need the server or dashboard. Nothing is saved and no SMS is sent.
+
+```bash
+python try_claude.py "went there yesterday the gate was locked, nobody there"
+python try_claude.py          # interactive: type messages, empty line to quit
+```
+
+Example output:
+
+```
+Message:   ok i can go monday
+Claude:    {"barrier": "plan_ack", "confidence": 0.9, "clinical_flag": false, ...}  (2.8s)
+Decision:  plan_ack  (reason: ok)
+Patient:   Thanks! See you at Demo Baraka Clinic on 2026-10-05.
+Clinic:    R-0142 arriving 2026-10-05. Reply Y R-0142 when seen.
+```
+
+Unlike the live app, the script calls Claude even when a clinical keyword matches, so you always see the model's own label. When that happens it adds a line saying the live app would have skipped Claude. If the call fails, it prints `Claude: FAILED (...)` and shows the fallback handoff to a health worker.
 
 ### Tests and evaluation
 
@@ -198,6 +212,74 @@ python eval.py heldout        # needs eval/heldout.jsonl, written by someone who
 ### Deploying
 
 [render.yaml](render.yaml) defines one Render web service with a persistent disk. The service must run **one worker and one thread**, because case updates are not protected against concurrent writes.
+
+## Pipeline roadmap
+
+How one incoming SMS moves through the code:
+
+```
+ Incoming SMS (Twilio /sms or simulator /sim)               app.py
+        │
+        ▼
+ Who sent it? (looked up by phone number)                   app.py
+        ├── CHW     ─► command: 1 / DONE / LOST R-0142, other text is relayed to the patient
+        ├── Clinic  ─► reply:   Y / N R-0142 (seen or not seen)
+        └── Patient ─► ROUTER, checked in this order:       core.route()
+              1. Opted out?             only START is accepted, everything else is ignored
+              2. Clinical keyword?      "pain", "fever", "damu" … ─► clinical path, Claude skipped
+              3. STOP / START           opt out / opt back in
+              4. Exact YES / NO         answer to an open follow-up question
+              5. Escalated, or nothing asked?  relay to the CHW who claimed it, or a holding reply
+              6. Bare "ok" / "yes" / "no" to other questions ─► rule-based follow-up question
+              7. Anything else          ─► Claude
+                        │
+                        ▼
+ Claude labels the message (JSON only)                      classify.py
+        │
+        ▼
+ Guards: invalid output, API error, low confidence          core.apply_guards()
+         or several barriers ─► "unknown"
+        │
+        ▼
+ Rules table picks exactly one action                       core.decide()
+        │
+        ▼
+ Send approved templates to patient / clinic / CHW,         app.py, templates.py
+ log every barrier and action in the events table           db.py
+        │
+        ▼
+ Timers: reminders, follow-up after the visit date,         scheduler.py
+         completion, lost after 7 quiet days
+        │
+        ▼
+ Dashboard and clinic reliability radar read the events     metrics.py
+```
+
+### Classification of a patient's response
+
+Claude picks one label from this fixed list. The code, not Claude, then decides the action and the reply.
+
+| Label | Meaning | Example message | What the agent does |
+|---|---|---|---|
+| `transport` | Can't get there | "how do i get there? i dont know the way" | Sends the clinic's directions and address |
+| `cost` | Worried about fees | "how much will the lab cost" | Sends the clinic's cost note, or hands to a CHW if it has none |
+| `wrong_facility` | The clinic doesn't offer the service | "they said they don't do this test here" | Points the case to another clinic that does and tells the patient |
+| `missing_documents` | Lacks a required document | "i dont have my ID" | Sends the list of documents to bring. A missing referral letter goes to a CHW |
+| `scheduling` | Can't get or doesn't know the appointment | "when can i come? i work all week" | Sends booking instructions. If a date is given, schedules the visit and tells the clinic |
+| `clinic_closed` | Went and it was shut | "went there yesterday the gate was locked" | Sends posted hours, or another clinic if it's closed today. Counts toward the radar |
+| `turned_away` | Open, but sent home | "they told me come back monday" | Tells the clinic the patient is coming on that date. Without a date, goes to a CHW. Counts toward the radar |
+| `language` | Didn't understand the language | "sielewi kiingereza, naomba kiswahili" | Resends in Swahili. Other languages go to a CHW |
+| `fear_confusion` | Scared or unsure why they were referred | "why do i need to go, is it serious?" | Sends a plain explanation of the referral |
+| `clinical_symptom` | Mentions any symptom or feeling worse | "my stomach has felt really strange" | Sends safety instructions with the emergency facility and number. Pages a CHW urgently |
+| `plan_ack` | No barrier, just a plan or thanks | "ok i can go monday" | Thanks the patient. If a date is given, schedules the visit and tells the clinic |
+| `unknown` | Unclear, off-topic or several barriers | "hmm maybe" | Asks once more, then hands to a CHW |
+
+Safety rules applied after Claude answers:
+
+- If Claude flags any symptom (`clinical_flag`), the message is treated as `clinical_symptom`, whatever the label.
+- Confidence below 0.7, or more than one barrier in one message, becomes `unknown`.
+- An API error, timeout or invalid response becomes `unknown` and goes to a CHW as **urgent**, so an outage can never delay a possible clinical message.
+- Extra details Claude extracts, such as a return date, area or missing document, are checked before use and dropped if invalid. For example, a date must fall within the next 30 days.
 
 ## Future steps
 
