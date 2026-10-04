@@ -1,6 +1,6 @@
 # SMS Voice: referral closure agent
 
-A referral gets written, and then often nothing happens. An estimated 30–50% of outpatient specialty referrals are never completed, and nobody owns the gap between "referred" and "seen".
+A referral gets written, and then often nothing happens. A number of outpatient specialty referrals are never completed, and nobody owns the gap between "referred" and "seen".
 
 This project is a low-bandwidth SMS agent that closes that gap. It works on a plain feature phone with no app. For each referred patient it:
 
