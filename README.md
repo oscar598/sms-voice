@@ -1,6 +1,10 @@
 # SMS Voice: referral closure agent
 
+<<<<<<< HEAD
 ## The problem
+=======
+A referral gets written, and then often nothing happens. A number of outpatient specialty referrals are never completed, and nobody owns the gap between "referred" and "seen".
+>>>>>>> 1c3952825c42f2264f75e952427b81bb469c0f2f
 
 A health worker refers a patient to a clinic, and then often nothing happens. The patient runs into a barrier: no fare for the matatu, a missing document, a locked gate, a front desk that sends them home. Nobody finds out which barrier it was. The community health worker (CHW) who made the referral usually never learns whether the patient arrived. Nobody owns the gap between "referred" and "seen".
 
